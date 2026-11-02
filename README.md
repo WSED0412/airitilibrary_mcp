@@ -1,0 +1,93 @@
+# airiti-mcp
+
+華藝線上圖書館（Airiti Library）的本機 MCP server（stdio）。**只做檢索與讀摘要**，不下載全文。
+
+| Tool | 用途 |
+|---|---|
+| `airiti_search(query, page=1, max_results=10)` | 搜尋（所有欄位）。回傳總筆數＋本頁每筆的篇名、作者、出處、DocID、詳目頁網址。`max_results` 1–20；每次只抓一頁。 |
+| `airiti_abstract(doc_id)` | 完整書目（含 DOI）、中文摘要、英文並列摘要、中英關鍵字、詳目頁網址。 |
+| `airiti_cite_apa(doc_id)` | 以書目資料產生 APA 7 引用（目前只支援期刊論文；學位論文會明確拒絕）。 |
+
+## 行為與限制
+
+- 不碰任何全文／PDF 下載端點；**不做任何快取**（頁面標示 `noarchive`），每次呼叫即時查詢。
+- 任兩次請求至少間隔 1.5 秒；逾時 15 秒。
+- 錯誤分開回報：`AiritiNetworkError`（連不上／逾時／非 200）、`AiritiParseError`（頁面結構不符，例如改版或 DocID 不存在）、
+  以及「0 筆結果」（連線與解析皆正常，確實沒有符合的文獻）。解析不到的欄位會寫「（無）」並在備註說明，不會猜。
+- DocID 格式不固定（可能含 `+` 等字元），一律原樣使用，由 search 結果取得。
+
+## 安裝
+
+需要 [uv](https://docs.astral.sh/uv/)（`winget install astral-sh.uv`）。
+
+```powershell
+cd <本專案資料夾>
+uv sync
+uv run pytest                      # 離線測試
+$env:AIRITI_LIVE=1; uv run pytest tests/test_live.py   # 實網測試（約 5 次請求）
+```
+
+## 註冊到 Claude Code
+
+```powershell
+claude mcp add airiti -- uv --directory "<專案資料夾完整路徑>" run airiti-mcp
+```
+
+加 `--scope user` 可在所有專案使用。用 `claude mcp list` 確認。
+
+## 註冊到 Claude 桌面版
+
+編輯 `claude_desktop_config.json`（設定 → 開發人員 → 編輯設定可直接開啟），加入下列內容。一般安裝在 `%APPDATA%\Claude\`；
+商店版（MSIX）在 `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\`。JSON 裡路徑的每個 `\` 都要寫成 `\\`（例如 `C:\\Users\\你\\...`）。
+
+```json
+{
+  "mcpServers": {
+    "airiti": {
+      "command": "<uv.exe完整路徑>",
+      "args": [
+        "--directory",
+        "<專案資料夾完整路徑>",
+        "run",
+        "airiti-mcp"
+      ]
+    }
+  }
+}
+```
+
+存檔後完全結束並重開 Claude 桌面版。桌面版不一定繼承 PATH，所以 `command` 用 uv 的絕對路徑（`where uv` 可查）。
+若專案路徑含中文導致啟動失敗，把專案移到純英文路徑（如 `C:\mcp\airiti`）再改 `--directory`。
+
+## 用 MCP Inspector 測試
+
+```powershell
+# 互動式介面
+npx @modelcontextprotocol/inspector uv --directory "<專案路徑>" run airiti-mcp
+# 指令列
+npx @modelcontextprotocol/inspector --cli uv --directory "<專案路徑>" run airiti-mcp --method tools/list
+npx @modelcontextprotocol/inspector --cli uv --directory "<專案路徑>" run airiti-mcp --method tools/call --tool-name airiti_search --tool-arg query="鷹架 數學解題"
+```
+
+## 結構（為了之後換成 HTTP 遠端版）
+
+```
+src/airiti_mcp/
+  server.py   # MCPServer 與 tool 定義，與傳輸層無關
+  stdio.py    # ← 傳輸層入口（目前 stdio）
+  client.py   # HTTP、限速、逾時、查詢 JSON 組裝
+  parsers.py  # 搜尋頁／詳目頁解析
+  cite.py     # APA 7
+  errors.py
+```
+
+改 Streamable HTTP 時只新增一個入口檔（例如 `http.py`：`from .server import mcp; mcp.run("streamable-http")`，
+或用 `mcp.streamable_http_app()` 掛到 uvicorn 並加上驗證），`server.py` 以下完全不用動。
+注意：限速目前是單一行程內的全域鎖；多行程部署時要改成共用的限速機制。
+
+## 備註
+
+- MCP Python SDK 已是 2.x，原本的 `FastMCP` 改名為 `MCPServer`（`mcp.server.mcpserver`）。2.x 只會把 `ToolError` 的訊息傳給用戶端，
+  所以 `server.py` 用 `_tool` 包裝把 `AiritiError` 轉成 `ToolError`。
+- 查詢 JSON 的 key（`SearchFileds`／`SearchFiledList`）是華藝原本的拼字，請勿修正。`BSF` 必填，沒送就不會有結果。
+- 搜尋欄位代碼（來自頁面 JS 列舉名稱）：`DSF.FieldName=49` ＝ 所有欄位含全文；`BSF.FieldName=0` ＝ 所有欄位。
