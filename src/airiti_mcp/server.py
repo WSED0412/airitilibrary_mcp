@@ -70,6 +70,14 @@ async def airiti_search(query: str, page: int = 1, max_results: int = 10) -> str
     html = await client.fetch_search_html(query, page, max_results)
     result = parsers.parse_search(html)
 
+    if result.total == 0 and page > 1:
+        # The site answers an out-of-range page with the same "0 筆" block as a truly empty
+        # query, so on page > 1 we cannot tell the two apart without another request.
+        return (
+            f"查詢「{query}」第 {page} 頁（每頁 {max_results} 筆）：華藝回報 0 筆。"
+            "這通常是頁碼超出總頁數，**不代表整個查詢沒有結果**；"
+            "請改查 page=1 取得總筆數與總頁數。"
+        )
     if result.total == 0:
         return (
             f"查詢「{query}」：華藝回報 0 筆結果（連線與解析皆正常，確實沒有符合的文獻）。\n"
@@ -80,8 +88,6 @@ async def airiti_search(query: str, page: int = 1, max_results: int = 10) -> str
 
     pages = -(-result.total // max_results)
     lines = [f"查詢「{query}」：共 {result.total} 筆；第 {page}/{pages} 頁（每頁 {max_results} 筆），本頁 {len(result.items)} 筆。"]
-    if page > pages:
-        lines.append("（頁碼超出範圍，本頁沒有資料。）")
     for i, it in enumerate(result.items, start=(page - 1) * max_results + 1):
         lines += [
             "",

@@ -157,3 +157,28 @@ def test_references_corrupt_json_is_loud():
     html = DETAIL.replace("</body>", "<script>var 全域_參考文獻 = '%7bbroken';</script></body>")
     with pytest.raises(AiritiParseError):
         parse_detail(html, "ID", with_references=True)
+
+
+def test_search_single_result_does_not_climb_to_whole_page():
+    sidebar = '<div class="side"><span class="author"><a>無關作者</a></span><span class="source"><span class="sourceTitleName">無關刊</span></span></div>'
+    r = parse_search(search_html("1 個查詢結果", [ITEM.format(key="K1", click="K1", n=1)]).replace("</div>", sidebar + "</div>", 1))
+    assert [i.doc_id for i in r.items] == ["K1"]
+    assert r.items[0].authors == ["甲(A)", "乙"] and "無關" not in r.items[0].source
+
+
+def test_search_count_needs_the_unit_word():
+    with pytest.raises(AiritiParseError):
+        parse_search('<div class="resultReport">第 1 頁</div>')
+    assert parse_search(search_html("1,234 個查詢結果", [ITEM.format(key="K", click="K", n=1)])).total == 1234
+
+
+def test_keywords_english_only_record():
+    html = DETAIL.replace("甲;乙｜alpha;beta", "alpha;beta")
+    d = parse_detail(html, "ID")
+    assert d.keywords_zh == [] and d.keywords_en == ["alpha", "beta"]
+
+
+@pytest.mark.parametrize("name", ["某大學資訊系碩士論文", "某大學教育學系博士論文", "某大學學位論文"])
+def test_apa_refuses_thesis_variants(name):
+    with pytest.raises(AiritiError):
+        apa7(parse_detail(DETAIL.replace("期刊名", name), "ID"))

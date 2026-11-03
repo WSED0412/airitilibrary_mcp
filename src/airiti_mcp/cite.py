@@ -16,7 +16,7 @@ def apa7(d: Detail) -> str:
             f"書目資料不足，無法產生 APA 引用（缺：{'、'.join(missing)}）。"
             "目前只支援有刊名的期刊論文；學位論文等請手動引用。"
         )
-    if d.journal.endswith("學位論文"):
+    if d.journal.endswith(("學位論文", "碩士論文", "博士論文", "碩士班論文", "博士班論文")):
         raise AiritiError("這是學位論文（頁面的「刊名」欄是校系名稱，不是期刊），目前不產生 APA 引用，請手動引用。")
     ym = re.match(r"\s*(\d{4})", d.date)
     if not ym:

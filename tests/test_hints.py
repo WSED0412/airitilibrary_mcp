@@ -1,23 +1,16 @@
-from airiti_mcp.hints import FEW_RESULTS, few_results_hint, variant_queries
+from airiti_mcp.hints import FEW_RESULTS, drop_one_queries, few_results_hint
 
 
-def test_variant_swaps_one_char_everywhere():
-    assert variant_queries("客語沉浸式教學 幼兒園") == ["客語沈浸式教學 幼兒園"]
-    assert variant_queries("台灣 台北") == ["臺灣 臺北"]
-    assert variant_queries("客語沈浸") == ["客語沉浸"]
+def test_drop_one_keyword():
+    assert drop_one_queries("客語沉浸式教學 幼兒園") == ["幼兒園", "客語沉浸式教學"]
+    assert drop_one_queries("a b c") == ["b c", "a c", "a b"]
 
 
-def test_variant_multiple_chars_one_suggestion_each():
-    assert set(variant_queries("台灣沉浸")) == {"臺灣沉浸", "台灣沈浸"}
+def test_single_keyword_has_no_drop_suggestion():
+    assert drop_one_queries("鷹架") == [] and drop_one_queries("") == []
 
 
-def test_no_variants_no_suggestions():
-    assert variant_queries("鷹架 數學解題") == []
-    assert variant_queries("") == []
-
-
-def test_hint_text():
-    h = few_results_hint("客語沉浸式教學", 3)
-    assert "只找到 3 筆" in h and "「客語沈浸式教學」" in h
-    assert "異體字寫法" not in few_results_hint("鷹架", 0)  # nothing concrete to suggest -> no variant line
-    assert FEW_RESULTS == 5
+def test_hint_text_does_not_claim_variant_chars_matter():
+    h = few_results_hint("客語沉浸式教學 幼兒園", 3)
+    assert "只找到 3 筆" in h and "「幼兒園」" in h and "AND" in h
+    assert "沈" not in h and FEW_RESULTS == 5

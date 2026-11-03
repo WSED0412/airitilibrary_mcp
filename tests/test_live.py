@@ -43,3 +43,8 @@ async def test_abstract_references_opt_in():
 async def test_few_results_hint_on_zero():
     out = await server.airiti_search("zzzxqjkw不存在的詞")
     assert "0 筆" in out and "提示：只找到 0 筆" in out
+
+
+async def test_out_of_range_page_is_not_reported_as_no_results():
+    out = await server.airiti_search("鷹架 數學解題", 50, 10)
+    assert "不代表整個查詢沒有結果" in out and "確實沒有符合" not in out

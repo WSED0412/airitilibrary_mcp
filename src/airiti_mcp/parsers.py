@@ -18,7 +18,7 @@ from .client import detail_url
 from .errors import AiritiParseError
 
 _ONCLICK_DOCID = re.compile(r"\(\s*'([^']+)'")
-_COUNT = re.compile(r"([\d,]+)")
+_COUNT = re.compile(r"([\d,]+)\s*個查詢結果")
 
 
 def _text(node: LexborNode | None) -> str:
@@ -40,6 +40,12 @@ class SearchItem:
 class SearchPage:
     total: int
     items: list[SearchItem] = field(default_factory=list)
+
+
+def _ancestors(node: LexborNode):
+    while node.parent is not None:
+        node = node.parent
+        yield node
 
 
 def parse_search(html: str) -> SearchPage:
@@ -71,13 +77,11 @@ def parse_search(html: str) -> SearchPage:
             raise AiritiParseError(f"篇名連結的 onclick 抓不到 DocID：{oc[:80]!r}")
         onclick_id = dm.group(1)
 
-        # climb to the item container: the highest ancestor that still holds exactly one title link
-        node, container = a, a
-        while node.parent is not None:
-            node = node.parent
-            if len(node.css("h3.ustyle_heading_H3 a[onclick]")) != 1:
-                break
-            container = node
+        # The item container is the nearest ancestor that holds this item's own checkbox
+        # (works for 1 result as well as 10; never climbs up to the whole page).
+        container = next((n for n in _ancestors(a) if n.css_first("input.Result_選擇") is not None), None)
+        if container is None:
+            raise AiritiParseError(f"找不到結果項目容器（DocID {onclick_id}）。結果列表結構可能已改版。")
 
         # The checkbox key holds the raw DocID; the onclick copy is percent-encoded by the site
         # (e.g. "+" -> "%2b"), so prefer the checkbox and only fall back to decoding the onclick.
@@ -156,6 +160,7 @@ def _meta(tree: LexborHTMLParser, name: str) -> str:
 
 
 _KW_SPLIT = re.compile(r"[;；]")
+_CJK = re.compile(r"[㐀-鿿]")
 _ABSTRACT_TITLES = ("摘要", "Abstracts", "Abstract")
 _PARALLEL_TITLES = ("並列摘要", "Parallel abstracts", "Parallel abstract")
 
@@ -206,7 +211,10 @@ def parse_detail(html: str, doc_id: str, with_references: bool = False) -> Detai
     kw_en: list[str] = []
     meta_kw = _meta(tree, "citation_keywords")
     if meta_kw:
-        zh_part, _, en_part = meta_kw.partition("｜")
+        if "｜" not in meta_kw and not _CJK.search(meta_kw):
+            zh_part, en_part = "", meta_kw  # English-only record: no 中英 separator
+        else:
+            zh_part, _, en_part = meta_kw.partition("｜")
         kw_zh = [k.strip() for k in _KW_SPLIT.split(zh_part) if k.strip()]
         kw_en = [k.strip() for k in _KW_SPLIT.split(en_part) if k.strip()]
     if not kw_zh:

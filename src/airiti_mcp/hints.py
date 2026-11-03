@@ -1,39 +1,31 @@
-"""Query hints. Airiti matches literal characters, so a query written with one variant
-form misses documents that use the other (e.g. 沉浸 vs 沈浸). Suggestions only -- we never
+"""Query hints for sparse results.
+
+Verified against the live site: Airiti already treats variant characters (沉/沈) as the same,
+and also maps Simplified input. What actually causes misses is that EVERY whitespace-separated
+keyword must match (AND), and that documents use different wording (e.g. 幼稚園 vs 幼兒園).
+So the useful suggestion is to drop a keyword or try a synonym. We only suggest; we never
 silently rewrite the user's query."""
 from __future__ import annotations
-
-# Common Traditional-Chinese variant pairs (both directions are generated).
-_PAIRS = ["沉沈", "台臺", "裡裏", "線綫", "群羣", "峰峯", "啟啓", "溫温", "週周", "著着", "衛衞", "污汙"]
-_VARIANTS: dict[str, str] = {}
-for _p in _PAIRS:
-    if len(_p) == 2 and _p[0] != _p[1]:
-        _VARIANTS[_p[0]] = _p[1]
-        _VARIANTS[_p[1]] = _p[0]
 
 FEW_RESULTS = 5  # below this many total hits, show the hint
 MAX_SUGGESTIONS = 3
 
 
-def variant_queries(query: str) -> list[str]:
-    """One suggestion per distinct variant character found in `query` (that character swapped
-    everywhere), at most MAX_SUGGESTIONS, never equal to the original."""
-    out: list[str] = []
-    for ch in dict.fromkeys(query):  # unique, order-preserving
-        alt = _VARIANTS.get(ch)
-        if alt:
-            q = query.replace(ch, alt)
-            if q != query and q not in out:
-                out.append(q)
-        if len(out) >= MAX_SUGGESTIONS:
-            break
-    return out
+def drop_one_queries(query: str) -> list[str]:
+    """Queries with one keyword removed (only for multi-keyword queries), at most MAX_SUGGESTIONS."""
+    words = query.split()
+    if len(words) < 2:
+        return []
+    return [" ".join(words[:i] + words[i + 1:]) for i in range(len(words))][:MAX_SUGGESTIONS]
 
 
 def few_results_hint(query: str, total: int) -> str:
-    lines = [f"提示：只找到 {total} 筆。華藝是逐字比對，用字不同（異體字、簡繁、同義詞、中英文）的文獻不會出現在這次結果裡。"]
-    alts = variant_queries(query)
+    lines = [
+        f"提示：只找到 {total} 筆。華藝要求每個關鍵字都符合（AND），而且逐詞比對；"
+        "文獻用詞不同（例如「幼稚園」與「幼兒園」、中英文）就不會出現。"
+    ]
+    alts = drop_one_queries(query)
     if alts:
-        lines.append("可以試試異體字寫法：" + "、".join(f"「{a}」" for a in alts))
-    lines.append("也可以：減少關鍵字、改用同義詞，或加上英文關鍵字。")
+        lines.append("可以試試少一個關鍵字：" + "、".join(f"「{a}」" for a in alts))
+    lines.append("也可以改用同義詞、較早年代的舊稱，或加上英文關鍵字。")
     return "\n".join(lines)
