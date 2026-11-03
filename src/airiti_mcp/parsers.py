@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from html import unescape
 from dataclasses import dataclass, field
 from urllib.parse import unquote
 
@@ -34,6 +35,7 @@ class SearchItem:
     source: str  # 刊名 / 卷期 / 年月 / 頁碼, as shown on the site
     kind: str  # 期刊 / 學位論文 / ...
     url: str
+    open_access: bool = False  # 'OpenAccess' tag shown on the result
 
 
 @dataclass
@@ -95,7 +97,8 @@ def parse_search(html: str) -> SearchPage:
             for sel in ("span.sourceTitleName", "span.sourcePub", "span.sourcedate", "span.sourcePageRange")
         ]
         source = " ".join(p for p in parts if p) or _text(src)
-        kind = _text(container.css_first("li.preTag span:not(.listType)"))
+        tags = [_text(x) for x in container.css("li.preTag")]
+        kind = next((t for t in tags if t and t != "OpenAccess"), "")
         items.append(
             SearchItem(
                 doc_id=doc_id,
@@ -104,6 +107,7 @@ def parse_search(html: str) -> SearchPage:
                 source=source,
                 kind=kind,
                 url=detail_url(doc_id),
+                open_access="OpenAccess" in tags,
             )
         )
 
@@ -143,6 +147,11 @@ class Detail:
     abstract_is_truncated: bool  # True if only the (truncated) meta abstract was available
     notes: list[str] = field(default_factory=list)  # things that were missing, stated explicitly
     references: list[Reference] | None = None  # None = not requested / not parsed
+    cited_by: list[Reference] | None = None  # works in Airiti that cite this one; None = not requested
+    title_en: str = ""
+    language: str = ""
+    open_access: bool = False
+    fulltext_marker: bool = False  # page says 可全文下載 (a label only; access may still need login/IP)
 
 
 def _meta_all(tree: LexborHTMLParser, name: str) -> list[str]:
@@ -182,7 +191,7 @@ def _abstract_block(tree: LexborHTMLParser, css: str, titles: tuple[str, ...]) -
     return "\n\n".join(p for p in paras if p), [k for k in kws if k]
 
 
-def parse_detail(html: str, doc_id: str, with_references: bool = False) -> Detail:
+def parse_detail(html: str, doc_id: str, with_references: bool = False, with_cited_by: bool = False) -> Detail:
     tree = LexborHTMLParser(html)
     title = _meta(tree, "citation_title")
     if not title:
@@ -224,9 +233,11 @@ def parse_detail(html: str, doc_id: str, with_references: bool = False) -> Detai
     if not kw_zh and not kw_en:
         notes.append("此文獻沒有關鍵字。")
 
-    references = None
-    if with_references:
-        references = parse_references(tree, html, notes)
+    references = parse_references(tree, html, notes) if with_references else None
+    cited_by = parse_cited_by(html, notes) if with_cited_by else None
+    em = _TITLE_EN_VAR.search(html)
+    title_en = unquote(em.group(1)).strip() if em else ""
+    tags = [_text(x) for x in tree.css("li.preTag")]
 
     return Detail(
         doc_id=doc_id,
@@ -249,6 +260,11 @@ def parse_detail(html: str, doc_id: str, with_references: bool = False) -> Detai
         abstract_is_truncated=truncated,
         notes=notes,
         references=references,
+        cited_by=cited_by,
+        title_en=title_en,
+        language=_meta(tree, "citation_language"),
+        open_access="OpenAccess" in tags,
+        fulltext_marker=tree.css_first(".downloadPoint.可全文下載") is not None,
     )
 
 
@@ -257,37 +273,53 @@ _REF_VAR = re.compile(r"var\s+全域_參考文獻\s*=\s*'([^']*)'")
 _REF_COUNT = re.compile(r"顯示所有\s*(\d+)\s*篇參考文獻")  # 顯示所有 N 篇參考文獻
 
 
-def parse_references(tree: LexborHTMLParser, html: str, notes: list[str]) -> list[Reference]:
-    """References are embedded in the page as URL-encoded JSON in the JS variable
-    `全域_參考文獻`. The page also prints "顯示所有 N 篇參考文獻"; it is used to cross-check
-    completeness. Raises if the variable exists but cannot be parsed (never returns a guess)."""
-    m = _REF_VAR.search(html)
+_TITLE_EN_VAR = re.compile(r"var\s+全域_編碼次要篇名\s*=\s*'([^']*)'")
+_CITED_VAR = re.compile(r"var\s+全域_被引用記錄\s*=\s*'([^']*)'")
+_TAG = re.compile(r"<[^>]+>")
+
+
+def _read_ref_list(html: str, var: "re.Pattern[str]", what: str, notes: list[str]) -> list[Reference]:
+    """Read a URL-encoded JSON list from a page JS variable. Missing variable -> explicit note;
+    present-but-unparseable -> AiritiParseError (never a guess)."""
+    m = var.search(html)
     if not m:
-        notes.append("頁面沒有參考文獻資料（找不到 全域_參考文獻）：可能此文獻沒有收錄參考文獻，或華藝改版。")
+        notes.append(f"頁面沒有{what}資料（找不到對應的頁面變數）：可能此文獻沒有，或華藝改版。")
         return []
     try:
         rows = json.loads(unquote(m.group(1)))
         if not isinstance(rows, list):
             raise ValueError("not a list")
     except ValueError as e:
-        raise AiritiParseError(f"參考文獻資料存在但無法解析（{e}）。可能是華藝改版。") from e
-
+        raise AiritiParseError(f"{what}資料存在但無法解析（{e}）。可能是華藝改版。") from e
     refs = [
         Reference(
             seq=str(r.get("Seq") or ""),
-            text=re.sub(r"\s+", " ", str(r.get("Reference") or "")).strip(),
+            text=re.sub(r"\s+", " ", unescape(_TAG.sub("", str(r.get("Reference") or "")))).strip(),
             doc_id=str(r.get("RDocID") or ""),
             doi=str(r.get("RDOI") or ""),
         )
         for r in rows
         if isinstance(r, dict)
     ]
-    refs = [r for r in refs if r.text]
-    if not refs:
-        notes.append("此文獻沒有參考文獻。")
-        return []
+    return [r for r in refs if r.text]
 
-    block = tree.css_first("#Detail_參考文獻_錨點")  # Detail_參考文獻_錨點
+
+def parse_cited_by(html: str, notes: list[str]) -> list[Reference]:
+    refs = _read_ref_list(html, _CITED_VAR, "被引用記錄", notes)
+    if not refs and _CITED_VAR.search(html):
+        notes.append("華藝沒有收錄引用此文獻的記錄（被引用 0 筆）。")
+    return refs
+
+
+def parse_references(tree: LexborHTMLParser, html: str, notes: list[str]) -> list[Reference]:
+    """References come from the JS variable `全域_參考文獻`; the page also prints
+    "顯示所有 N 篇參考文獻", used to cross-check completeness."""
+    refs = _read_ref_list(html, _REF_VAR, "參考文獻", notes)
+    if not refs:
+        if _REF_VAR.search(html):
+            notes.append("此文獻沒有參考文獻。")
+        return []
+    block = tree.css_first("#Detail_參考文獻_錨點")
     cm = _REF_COUNT.search(block.text()) if block else None
     if cm and int(cm.group(1)) != len(refs):
         notes.append(f"參考文獻筆數不一致：頁面標示 {cm.group(1)} 篇，實際解析到 {len(refs)} 篇，清單可能不完整。")

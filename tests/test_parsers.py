@@ -182,3 +182,46 @@ def test_keywords_english_only_record():
 def test_apa_refuses_thesis_variants(name):
     with pytest.raises(AiritiError):
         apa7(parse_detail(DETAIL.replace("期刊名", name), "ID"))
+
+
+def _extras_html(cited_rows=None):
+    import json
+    from urllib.parse import quote
+    html = DETAIL.replace("<meta name='citation_title'", "<meta name='citation_language' content='en;zh-tw' /><meta name='citation_title'")
+    extra = "<ul><li class='preTag journal'><span>期刊</span></li><li class='preTag'><span>OpenAccess</span></li></ul>"
+    extra += "<div class='downloadPoint 可全文下載'>x</div>"
+    extra += "<script>var 全域_編碼次要篇名 = '" + quote("English Title") + "';</script>"
+    if cited_rows is not None:
+        extra += "<script>var 全域_被引用記錄 = '" + quote(json.dumps(cited_rows, ensure_ascii=False)) + "';</script>"
+    return html.replace("</body>", extra + "</body>")
+
+
+def test_detail_extra_fields():
+    d = parse_detail(_extras_html(), "ID")
+    assert d.title_en == "English Title" and d.language == "en;zh-tw"
+    assert d.open_access and d.fulltext_marker
+    assert d.cited_by is None  # opt-in
+
+
+def test_detail_extra_fields_absent_are_empty_not_guessed():
+    d = parse_detail(DETAIL, "ID")
+    assert (d.title_en, d.language, d.open_access, d.fulltext_marker) == ("", "", False, False)
+
+
+def test_cited_by_strips_html_and_keeps_docid():
+    rows = [{"Reference": "李文雅（2017）。<a href='https://x/y'>某論文</a>&amp;X", "RDocID": "U0017-1", "RDOI": "10.1/z"}]
+    d = parse_detail(_extras_html(rows), "ID", with_cited_by=True)
+    assert [(r.text, r.doc_id, r.doi) for r in d.cited_by] == [("李文雅（2017）。某論文&X", "U0017-1", "10.1/z")]
+
+
+def test_cited_by_zero_and_missing_are_stated():
+    d0 = parse_detail(_extras_html([]), "ID", with_cited_by=True)
+    assert d0.cited_by == [] and any("被引用 0 筆" in n for n in d0.notes)
+    dm = parse_detail(DETAIL, "ID", with_cited_by=True)
+    assert dm.cited_by == [] and any("被引用記錄" in n for n in dm.notes)
+
+
+def test_search_open_access_tag():
+    item = ITEM.format(key="K", click="K", n=1).replace("</ul>", "<li class='preTag'><span>OpenAccess</span></li></ul>")
+    r = parse_search(search_html(items=[item]))
+    assert r.items[0].open_access and r.items[0].kind == "期刊"

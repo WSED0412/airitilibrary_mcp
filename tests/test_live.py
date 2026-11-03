@@ -48,3 +48,14 @@ async def test_few_results_hint_on_zero():
 async def test_out_of_range_page_is_not_reported_as_no_results():
     out = await server.airiti_search("鷹架 數學解題", 50, 10)
     assert "不代表整個查詢沒有結果" in out and "確實沒有符合" not in out
+
+
+async def test_abstract_extra_fields_and_cited_by():
+    out = await server.airiti_abstract("P20240112001-N202410010002-00002")
+    assert "英文篇名：Exploring Effects of Mathematical Affections" in out and "語言：en;zh-tw" in out
+    old = await server.airiti_abstract("15601277-200010-201207250015-201207250015-49-72+171", include_cited_by=True)
+    assert "## 被引用記錄" in old and "DocID：U" in old and "<a " not in old
+
+
+async def test_search_shows_open_access():
+    assert "[OpenAccess]" in await server.airiti_search("鷹架 數學解題", 1, 10)
