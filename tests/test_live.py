@@ -31,3 +31,10 @@ async def test_abstract():
 async def test_abstract_bad_docid():
     with pytest.raises(Exception, match="不是文獻詳目頁"):
         await server.airiti_abstract("NOPE-does-not-exist")
+
+
+async def test_abstract_references_opt_in():
+    base = await server.airiti_abstract("P20240112001-N202410010002-00002")
+    assert "## 參考文獻" not in base
+    out = await server.airiti_abstract("P20240112001-N202410010002-00002", include_references=True)
+    assert "## 參考文獻（20 篇）" in out and "楊嘉勝（2011）" in out and "不一致" not in out

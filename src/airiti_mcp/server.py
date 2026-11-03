@@ -91,19 +91,21 @@ async def airiti_search(query: str, page: int = 1, max_results: int = 10) -> str
     return "\n".join(lines)
 
 
-async def _detail(doc_id: str) -> parsers.Detail:
+async def _detail(doc_id: str, with_references: bool = False) -> parsers.Detail:
     doc_id = _check_doc_id(doc_id)
-    return parsers.parse_detail(await client.fetch_detail_html(doc_id), doc_id)
+    return parsers.parse_detail(await client.fetch_detail_html(doc_id), doc_id, with_references)
 
 
 @_tool
-async def airiti_abstract(doc_id: str) -> str:
+async def airiti_abstract(doc_id: str, include_references: bool = False) -> str:
     """讀取一篇華藝文獻的完整書目、中文摘要、英文並列摘要與中英關鍵字。
 
     Args:
         doc_id: 華藝 DocID（由 airiti_search 取得，格式不固定，請原樣傳入）。
+        include_references: 是否附上參考文獻清單，預設 False（清單可能很長）。
+            清單中若被引用文獻也收錄於華藝，會標出其 DocID，可再丟給本工具。
     """
-    d = await _detail(doc_id)
+    d = await _detail(doc_id, include_references)
     vol_issue = "".join([f"第{d.volume}卷" if d.volume else "", f"第{d.issue}期" if d.issue else ""])
     pages = f"{d.first_page}–{d.last_page}" if d.first_page and d.last_page else d.first_page
     rows = [
@@ -124,6 +126,14 @@ async def airiti_abstract(doc_id: str) -> str:
     out += ["", "## 關鍵字", "、".join(d.keywords_zh) or "（無）"]
     out += ["", "## 並列摘要（英文）", d.abstract_parallel or "（無）"]
     out += ["", "## 並列關鍵字", "; ".join(d.keywords_en) or "（無）"]
+    if d.references is not None:
+        out += ["", f"## 參考文獻（{len(d.references)} 篇）"]
+        for i, r in enumerate(d.references, 1):
+            extra = [f"DocID：{r.doc_id}" if r.doc_id else "", f"DOI：{r.doi}" if r.doi else ""]
+            extra = "；".join(e for e in extra if e)
+            out.append(f"{i}. {r.text}" + (f"\n   （{extra}）" if extra else ""))
+        if not d.references:
+            out.append("（無）")
     if d.notes:
         out += ["", "## 備註"] + [f"- {n}" for n in d.notes]
     return "\n".join(out)

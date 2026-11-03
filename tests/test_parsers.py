@@ -116,3 +116,44 @@ def test_query_string_shape():
 
 def test_detail_url_encodes_once():
     assert detail_url("a+b/c") == "https://www.airitilibrary.com/Article/Detail?DocID=a%2Bb%2Fc"
+
+
+def _with_refs(rows, label="顯示所有 2 篇參考文獻"):
+    import json
+    from urllib.parse import quote
+    js = f"<script>var 全域_參考文獻 = '{quote(json.dumps(rows, ensure_ascii=False))}';</script>"
+    block = f'<div id="Detail_參考文獻_錨點">{label}</div>'
+    return DETAIL.replace("</body>", block + js + "</body>")
+
+
+REFS = [
+    {"Seq": "1", "Reference": "甲（2011）。 論文A。", "RDocID": "U0030-X", "RDOI": "10.1/a"},
+    {"Seq": "2", "Reference": "乙 (2012).  Paper B.", "RDocID": None, "RDOI": None},
+]
+
+
+def test_references_off_by_default():
+    assert parse_detail(_with_refs(REFS), "ID").references is None
+
+
+def test_references_parsed_and_count_checked():
+    d = parse_detail(_with_refs(REFS), "ID", with_references=True)
+    assert [(r.text, r.doc_id, r.doi) for r in d.references] == [
+        ("甲（2011）。 論文A。", "U0030-X", "10.1/a"), ("乙 (2012). Paper B.", "", "")]
+    assert not any("不一致" in n for n in d.notes)
+
+
+def test_references_count_mismatch_is_reported():
+    d = parse_detail(_with_refs(REFS, "顯示所有 5 篇參考文獻"), "ID", with_references=True)
+    assert len(d.references) == 2 and any("不一致" in n and "5" in n for n in d.notes)
+
+
+def test_references_missing_variable_is_stated_not_silent():
+    d = parse_detail(DETAIL, "ID", with_references=True)
+    assert d.references == [] and any("參考文獻" in n for n in d.notes)
+
+
+def test_references_corrupt_json_is_loud():
+    html = DETAIL.replace("</body>", "<script>var 全域_參考文獻 = '%7bbroken';</script></body>")
+    with pytest.raises(AiritiParseError):
+        parse_detail(html, "ID", with_references=True)

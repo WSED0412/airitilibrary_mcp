@@ -5,7 +5,7 @@
 | Tool | 用途 |
 |---|---|
 | `airiti_search(query, page=1, max_results=10)` | 搜尋（所有欄位）。回傳總筆數＋本頁每筆的篇名、作者、出處、DocID、詳目頁網址。`max_results` 1–20；每次只抓一頁。 |
-| `airiti_abstract(doc_id)` | 完整書目（含 DOI）、中文摘要、英文並列摘要、中英關鍵字、詳目頁網址。 |
+| `airiti_abstract(doc_id, include_references=False)` | 完整書目（含 DOI）、中文摘要、英文並列摘要、中英關鍵字、詳目頁網址。`include_references=True` 時附上參考文獻清單（預設關閉，清單可能很長；被引用文獻若收錄於華藝會標出 DocID）。 |
 | `airiti_cite_apa(doc_id)` | 以書目資料產生 APA 7 引用（目前只支援期刊論文；學位論文會明確拒絕）。 |
 
 ## 行為與限制
