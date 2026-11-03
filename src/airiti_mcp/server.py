@@ -8,7 +8,7 @@ import logging
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from . import client, parsers
+from . import client, hints, parsers
 from .cite import apa7
 from .errors import AiritiError
 
@@ -71,7 +71,10 @@ async def airiti_search(query: str, page: int = 1, max_results: int = 10) -> str
     result = parsers.parse_search(html)
 
     if result.total == 0:
-        return f"查詢「{query}」：華藝回報 0 筆結果（連線與解析皆正常，確實沒有符合的文獻）。"
+        return (
+            f"查詢「{query}」：華藝回報 0 筆結果（連線與解析皆正常，確實沒有符合的文獻）。\n"
+            + hints.few_results_hint(query, 0)
+        )
     if not result.items:  # unreachable (parser raises), kept as a guard
         raise AiritiError("解析結果異常：有總筆數但沒有項目。")
 
@@ -88,6 +91,8 @@ async def airiti_search(query: str, page: int = 1, max_results: int = 10) -> str
             f"   DocID：{it.doc_id}",
             f"   網址：{it.url}",
         ]
+    if result.total < hints.FEW_RESULTS:
+        lines += ["", hints.few_results_hint(query, result.total)]
     return "\n".join(lines)
 
 

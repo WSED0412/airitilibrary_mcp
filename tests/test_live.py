@@ -19,7 +19,7 @@ async def test_search_plus_docid_roundtrip():
 
 
 async def test_search_zero():
-    assert "0 筆" in await server.airiti_search("zzzxqjkw不存在的詞")
+    assert "0 筆" in await server.airiti_search("zzzxqjkw不存在的詞")  # also covered with hint below
 
 
 async def test_abstract():
@@ -38,3 +38,8 @@ async def test_abstract_references_opt_in():
     assert "## 參考文獻" not in base
     out = await server.airiti_abstract("P20240112001-N202410010002-00002", include_references=True)
     assert "## 參考文獻（20 篇）" in out and "楊嘉勝（2011）" in out and "不一致" not in out
+
+
+async def test_few_results_hint_on_zero():
+    out = await server.airiti_search("zzzxqjkw不存在的詞")
+    assert "0 筆" in out and "提示：只找到 0 筆" in out
