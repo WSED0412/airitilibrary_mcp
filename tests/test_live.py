@@ -52,10 +52,20 @@ async def test_out_of_range_page_is_not_reported_as_no_results():
 
 async def test_abstract_extra_fields_and_cited_by():
     out = await server.airiti_abstract("P20240112001-N202410010002-00002")
-    assert "英文篇名：Exploring Effects of Mathematical Affections" in out and "語言：en;zh-tw" in out
+    assert "並列篇名：Exploring Effects of Mathematical Affections" in out and "語言：en;zh-tw" in out
     old = await server.airiti_abstract("15601277-200010-201207250015-201207250015-49-72+171", include_cited_by=True)
     assert "## 被引用記錄" in old and "DocID：U" in old and "<a " not in old
 
 
 async def test_search_shows_open_access():
     assert "[OpenAccess]" in await server.airiti_search("鷹架 數學解題", 1, 10)
+
+
+async def test_thesis_style_docid_error_explains_why():
+    with pytest.raises(Exception, match="airitietds.com"):
+        await server.airiti_abstract("U0021-1610201315285936")
+
+
+async def test_open_access_on_detail_page():
+    out = await server.airiti_abstract("1027507x-201212-201301160049-201301160049-563-586")
+    assert "開放取用：是" in out

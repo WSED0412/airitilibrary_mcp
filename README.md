@@ -91,3 +91,7 @@ src/airiti_mcp/
   所以 `server.py` 用 `_tool` 包裝把 `AiritiError` 轉成 `ToolError`。
 - 查詢 JSON 的 key（`SearchFileds`／`SearchFiledList`）是華藝原本的拼字，請勿修正。`BSF` 必填，沒送就不會有結果。
 - 搜尋欄位代碼（來自頁面 JS 列舉名稱）：`DSF.FieldName=49` ＝ 所有欄位含全文；`BSF.FieldName=0` ＝ 所有欄位。
+- **學位論文**：華藝已把學位論文分到另一個網站（airitietds.com），`airitilibrary.com` 的搜尋結果只剩期刊／會議論文，
+  `U…` 開頭的學位論文 DocID（常出現在被引用記錄裡）也讀不到詳目頁，工具會明說原因。
+- **搜尋比對**：每個關鍵字都必須符合（AND），逐詞比對。實測華藝已統一 沉/沈、台/臺、群/羣、溫/温、週/周、峰/峯，
+  但**沒統一** 啟/啓、線/綫、楣/霉、裡/裏、衛/衞、污/汙；簡體輸入有互通但筆數略少。結果少於 5 筆時，工具會提示可試的寫法。

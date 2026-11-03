@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import functools
 import logging
+import re
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from . import client, hints, parsers
 from .cite import apa7
-from .errors import AiritiError
+from .errors import AiritiError, AiritiParseError
 
 mcp = MCPServer(
     "airiti-library",
@@ -104,7 +105,16 @@ async def airiti_search(query: str, page: int = 1, max_results: int = 10) -> str
 
 async def _detail(doc_id: str, with_references: bool = False, with_cited_by: bool = False) -> parsers.Detail:
     doc_id = _check_doc_id(doc_id)
-    return parsers.parse_detail(await client.fetch_detail_html(doc_id), doc_id, with_references, with_cited_by)
+    html = await client.fetch_detail_html(doc_id)
+    try:
+        return parsers.parse_detail(html, doc_id, with_references, with_cited_by)
+    except AiritiParseError as e:
+        if re.match(r"U\d", doc_id):
+            raise AiritiParseError(
+                f"{e} 另外，U 開頭的 DocID 多半是學位論文；華藝已把學位論文分到 airitietds.com，"
+                "airitilibrary.com 目前讀不到這類詳目頁。"
+            ) from e
+        raise
 
 
 def _render_refs(title: str, refs: list[parsers.Reference]) -> list[str]:
@@ -133,7 +143,7 @@ async def airiti_abstract(doc_id: str, include_references: bool = False, include
     pages = f"{d.first_page}–{d.last_page}" if d.first_page and d.last_page else d.first_page
     rows = [
         ("篇名", d.title),
-        ("英文篇名", d.title_en),
+        ("並列篇名", d.title_parallel),
         ("作者", "、".join(d.authors)),
         ("期刊", d.journal),
         ("卷期", vol_issue),

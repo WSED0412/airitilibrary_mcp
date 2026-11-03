@@ -82,7 +82,7 @@ def parse_search(html: str) -> SearchPage:
         # The item container is the nearest ancestor that holds this item's own checkbox
         # (works for 1 result as well as 10; never climbs up to the whole page).
         container = next((n for n in _ancestors(a) if n.css_first("input.Result_選擇") is not None), None)
-        if container is None:
+        if container is None or len(container.css("h3.ustyle_heading_H3 a[onclick]")) != 1:
             raise AiritiParseError(f"找不到結果項目容器（DocID {onclick_id}）。結果列表結構可能已改版。")
 
         # The checkbox key holds the raw DocID; the onclick copy is percent-encoded by the site
@@ -148,7 +148,7 @@ class Detail:
     notes: list[str] = field(default_factory=list)  # things that were missing, stated explicitly
     references: list[Reference] | None = None  # None = not requested / not parsed
     cited_by: list[Reference] | None = None  # works in Airiti that cite this one; None = not requested
-    title_en: str = ""
+    title_parallel: str = ""  # 次要篇名: English title for a Chinese article, Chinese title for an English one
     language: str = ""
     open_access: bool = False
     fulltext_marker: bool = False  # page says 可全文下載 (a label only; access may still need login/IP)
@@ -236,7 +236,7 @@ def parse_detail(html: str, doc_id: str, with_references: bool = False, with_cit
     references = parse_references(tree, html, notes) if with_references else None
     cited_by = parse_cited_by(html, notes) if with_cited_by else None
     em = _TITLE_EN_VAR.search(html)
-    title_en = unquote(em.group(1)).strip() if em else ""
+    title_parallel = unquote(em.group(1)).strip() if em else ""
     tags = [_text(x) for x in tree.css("li.preTag")]
 
     return Detail(
@@ -261,7 +261,7 @@ def parse_detail(html: str, doc_id: str, with_references: bool = False, with_cit
         notes=notes,
         references=references,
         cited_by=cited_by,
-        title_en=title_en,
+        title_parallel=title_parallel,
         language=_meta(tree, "citation_language"),
         open_access="OpenAccess" in tags,
         fulltext_marker=tree.css_first(".downloadPoint.可全文下載") is not None,
@@ -285,8 +285,11 @@ def _read_ref_list(html: str, var: "re.Pattern[str]", what: str, notes: list[str
     if not m:
         notes.append(f"頁面沒有{what}資料（找不到對應的頁面變數）：可能此文獻沒有，或華藝改版。")
         return []
+    raw = unquote(m.group(1)).strip()
+    if not raw:  # empty variable = nothing to list
+        return []
     try:
-        rows = json.loads(unquote(m.group(1)))
+        rows = json.loads(raw)
         if not isinstance(rows, list):
             raise ValueError("not a list")
     except ValueError as e:

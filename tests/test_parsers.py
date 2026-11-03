@@ -198,14 +198,14 @@ def _extras_html(cited_rows=None):
 
 def test_detail_extra_fields():
     d = parse_detail(_extras_html(), "ID")
-    assert d.title_en == "English Title" and d.language == "en;zh-tw"
+    assert d.title_parallel == "English Title" and d.language == "en;zh-tw"
     assert d.open_access and d.fulltext_marker
     assert d.cited_by is None  # opt-in
 
 
 def test_detail_extra_fields_absent_are_empty_not_guessed():
     d = parse_detail(DETAIL, "ID")
-    assert (d.title_en, d.language, d.open_access, d.fulltext_marker) == ("", "", False, False)
+    assert (d.title_parallel, d.language, d.open_access, d.fulltext_marker) == ("", "", False, False)
 
 
 def test_cited_by_strips_html_and_keeps_docid():
@@ -225,3 +225,16 @@ def test_search_open_access_tag():
     item = ITEM.format(key="K", click="K", n=1).replace("</ul>", "<li class='preTag'><span>OpenAccess</span></li></ul>")
     r = parse_search(search_html(items=[item]))
     assert r.items[0].open_access and r.items[0].kind == "期刊"
+
+
+def test_empty_string_js_variable_means_none_not_a_parse_error():
+    html = DETAIL.replace("</body>", "<script>var 全域_參考文獻 = '';var 全域_被引用記錄 = '';</script></body>")
+    d = parse_detail(html, "ID", with_references=True, with_cited_by=True)
+    assert d.references == [] and d.cited_by == []
+
+
+def test_search_item_without_own_checkbox_is_loud_not_misattributed():
+    ok = ITEM.format(key="K1", click="K1", n=1)
+    broken = ITEM.format(key="K2", click="K2", n=2).replace('<input type="checkbox" class="Result_選擇" key="K2" key1="P001">', "")
+    with pytest.raises(AiritiParseError):
+        parse_search(search_html(items=[ok, broken]))
