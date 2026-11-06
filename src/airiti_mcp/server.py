@@ -5,11 +5,12 @@ from __future__ import annotations
 import functools
 import logging
 import re
+from datetime import datetime
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from . import cite_export, client, hints, parsers
+from . import cite_export, client, hints, parsers, search_export
 from .cite import apa7
 from .errors import AiritiError, AiritiParseError
 
@@ -217,3 +218,76 @@ async def airiti_export_citation(doc_ids: list[str], format: str = "bibtex") -> 
         raise AiritiError(f"華藝沒有回傳 {desc} 內容（重試一次仍失敗）。站方訊息：{site_msg or '（無）'}。{hint}")
     name = ids[0] if len(ids) == 1 else f"airiti_export_{len(ids)}篇"
     return f"{desc}，共 {len(ids)} 篇，建議存成 {name}.{ext}：\n```\n{content}\n```"
+
+
+MAX_TOTAL_DEFAULT = 1000
+MAX_TOTAL_LIMIT = 2000
+
+
+@_tool
+async def airiti_search_all(query: str, max_total: int = MAX_TOTAL_DEFAULT) -> str:
+    """抓完一個查詢的所有結果頁，存成 CSV 清單與檢索紀錄檔（適合系統性文獻回顧）。
+
+    Args:
+        query: 搜尋關鍵字，空白分隔（每個詞都要符合），例如「鷹架 數學解題」。
+        max_total: 最多取得幾筆，1–2000，預設 1000；總筆數超過時結果會被截斷，紀錄檔會註明。
+    檔案寫到固定資料夾（預設為使用者家目錄下的 airiti_exports，可用環境變數 AIRITI_EXPORT_DIR 更改），
+    每次檢索一個新的子資料夾。只回傳摘要與檔案路徑，不把全部結果放進對話；
+    要匯出書目，可把 CSV 裡的 DocID 每 20 個一批交給 airiti_export_citation。
+    """
+    query = (query or "").strip()
+    if not query:
+        raise AiritiError("query 不能是空的。")
+    if not 1 <= max_total <= MAX_TOTAL_LIMIT:
+        raise AiritiError(f"max_total 必須介於 1 到 {MAX_TOTAL_LIMIT}。")
+
+    when = datetime.now().astimezone()
+    items: list[parsers.SearchItem] = []
+    fetched = pages_fetched = 0
+    error = ""
+    first = parsers.parse_search(await client.fetch_search_html(query, 1, MAX_PAGE_SIZE))
+    total = first.total
+    if total == 0:
+        return (
+            f"查詢「{query}」：華藝回報 0 筆結果，沒有產生檔案。\n" + hints.few_results_hint(query, 0)
+        )
+    pages_fetched, fetched, items = 1, len(first.items), list(first.items)
+    pages_needed = -(-min(total, max_total) // MAX_PAGE_SIZE)
+    for page in range(2, pages_needed + 1):
+        try:
+            res = parsers.parse_search(await client.fetch_search_html(query, page, MAX_PAGE_SIZE))
+        except AiritiError as e:  # keep what we have; the log says the run is incomplete
+            error = f"第 {page} 頁：{type(e).__name__}: {e}"
+            break
+        if not res.items:
+            error = f"第 {page} 頁沒有項目（華藝回報 {res.total} 筆），提前停止。"
+            break
+        pages_fetched += 1
+        fetched += len(res.items)
+        items += res.items
+    seen: set[str] = set()
+    unique_items = [it for it in items if not (it.doc_id in seen or seen.add(it.doc_id))][:max_total]
+
+    folder = search_export.export_root() / search_export.run_folder_name(query, when)
+    folder.mkdir(parents=True, exist_ok=True)
+    csv_path, log_path = folder / "results.csv", folder / "search_log.txt"
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as f:  # utf-8-sig: BOM so Excel reads UTF-8
+        f.write(search_export.build_csv(unique_items))
+    log_path.write_text(
+        search_export.build_log(
+            query=query, when=when, reported_total=total, fetched=fetched, unique=len(unique_items),
+            pages_fetched=pages_fetched, page_size=MAX_PAGE_SIZE, cap=max_total, items=unique_items, error=error,
+        ),
+        encoding="utf-8",
+    )
+    out = [
+        f"查詢「{query}」：華藝回報共 {total} 筆；取得 {len(unique_items)} 筆（{pages_fetched} 頁）。",
+        f"清單：{csv_path}",
+        f"檢索紀錄：{log_path}",
+    ]
+    if error:
+        out.append(f"【不完整】抓取中途失敗，已存下已取得的部分。{error}")
+    if total > max_total:
+        out.append(f"【截斷】總筆數 {total} 超過 max_total={max_total}；建議加關鍵字縮小範圍，或調高 max_total（上限 {MAX_TOTAL_LIMIT}）。")
+    out += ["", "前 5 筆："] + [f"{i}. {it.title}（DocID：{it.doc_id}）" for i, it in enumerate(unique_items[:5], 1)]
+    return "\n".join(out)

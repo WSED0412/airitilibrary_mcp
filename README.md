@@ -8,6 +8,7 @@
 | `airiti_abstract(doc_id, include_references=False, include_cited_by=False)` | 完整書目（含 DOI、英文篇名、語言、OpenAccess、可全文下載標記）、中文摘要、英文並列摘要、中英關鍵字。選填：`include_references` 附參考文獻、`include_cited_by` 附華藝收錄的被引用記錄（兩者預設關閉，清單可能很長；有 DocID 的可再丟給本工具）。 |
 | `airiti_cite_apa(doc_id)` | 以書目資料產生 APA 7 引用（目前只支援期刊論文；學位論文會明確拒絕）。 |
 | `airiti_export_citation(doc_ids, format="bibtex")` | 回傳華藝官方匯出的書目檔內容，`doc_ids` 為清單（一次最多 20 篇，合成一個檔），`format` 為 `bibtex`／`ris`／`endnote`，可存檔後匯入 Zotero、Mendeley、EndNote 等。內容原樣來自華藝，不修改；不論幾篇都只多 2 個請求。注意：清單中只要有一個無效 DocID，華藝會整批失敗。 |
+| `airiti_search_all(query, max_total=1000)` | 抓完一個查詢的所有結果頁（每頁 20 筆、頁間隔 1.5 秒），寫成 `results.csv`（DocID、篇名、作者、出處、類型…）與 `search_log.txt`（檢索日期、檢索式、總筆數、實際取得筆數、類型分布，可寫進方法章節）。檔案存到 `~/airiti_exports/<時間>_<關鍵字>/`，可用環境變數 `AIRITI_EXPORT_DIR` 改位置；工具本身不接受路徑。`max_total` 1–2000，超過時紀錄會註明結果被截斷；中途失敗會保留已取得的部分並標示不完整。只回傳摘要與路徑。 |
 
 ## 行為與限制
 
@@ -80,6 +81,7 @@ src/airiti_mcp/
   parsers.py  # 搜尋頁／詳目頁解析
   cite.py     # APA 7
   cite_export.py  # 華藝官方書目匯出（BibTeX／RIS／EndNote）的解析
+  search_export.py  # airiti_search_all 的 CSV 與檢索紀錄檔
   errors.py
 ```
 
