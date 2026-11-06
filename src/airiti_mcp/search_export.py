@@ -29,14 +29,48 @@ def run_folder_name(query: str, when: datetime) -> str:
     return f"{when:%Y%m%d_%H%M%S}_{slug}"
 
 
+def is_preprint(it: SearchItem) -> bool:
+    """Airiti lists an article twice once it is published: the advance-online ("預刊文章") record and
+    the issue record. The advance-online one says so in its source line."""
+    return "預刊" in (it.source or "")
+
+
+def _norm_title(title: str) -> str:
+    return re.sub(r"[\W_]+", "", (title or "").casefold())
+
+
+def _norm_author(name: str) -> str:
+    """'蔡欣倫(Hsin-Luen Tsai)' -> '蔡欣倫': compare the name as printed first, ignore the romanisation."""
+    return re.split(r"[(（]", name or "", maxsplit=1)[0].strip().casefold()
+
+
+def duplicate_groups(items: list[SearchItem]) -> dict[str, str]:
+    """doc_id -> group label ("D1", "D2", ...) for records that share normalised title AND author set.
+    Only flags; nothing is removed (which record to keep is the reviewer's call). Records with the same
+    title but different authors are different papers and are not flagged."""
+    buckets: dict[tuple[str, frozenset[str]], list[str]] = {}
+    for it in items:
+        key = (_norm_title(it.title), frozenset(a for a in map(_norm_author, it.authors) if a))
+        if key[0]:
+            buckets.setdefault(key, []).append(it.doc_id)
+    out: dict[str, str] = {}
+    n = 0
+    for ids in buckets.values():
+        if len(ids) > 1:
+            n += 1
+            out.update({i: f"D{n}" for i in ids})
+    return out
+
+
 def build_csv(items: list[SearchItem]) -> str:
+    groups = duplicate_groups(items)
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["序號", "DocID", "篇名", "作者", "出處", "類型", "OpenAccess", "網址"])
+    w.writerow(["序號", "DocID", "篇名", "作者", "出處", "類型", "OpenAccess", "網址", "預刊", "疑似重複組"])
     for i, it in enumerate(items, 1):
         w.writerow([
             i, it.doc_id, it.title, "；".join(it.authors), it.source, it.kind,
-            "Y" if it.open_access else "", it.url,
+            "Y" if it.open_access else "", it.url, "Y" if is_preprint(it) else "", groups.get(it.doc_id, ""),
         ])
     return buf.getvalue()
 
@@ -49,6 +83,8 @@ def build_log(
     deduped = unique if deduped is None else deduped
     truncated = reported_total > cap
     kinds = Counter(it.kind or "（未標示）" for it in items)
+    groups = duplicate_groups(items)
+    n_groups = len(set(groups.values()))
     lines = [
         "華藝線上圖書館（Airiti Library）檢索紀錄",
         "=" * 40,
@@ -64,6 +100,8 @@ def build_log(
         f"去除重複 DocID：移除 {fetched - deduped} 筆，剩 {deduped} 筆",
         f"超過上限而未納入：{deduped - unique} 筆（不是重複）" if deduped > unique else "超過上限而未納入：0 筆",
         f"納入清單（results.csv）：{unique} 筆",
+        f"疑似重複（篇名與作者相同、DocID 不同；未自動移除）：{n_groups} 組、涉及 {len(groups)} 筆，見 results.csv「疑似重複組」欄",
+        f"預刊文章（出處標示預刊，通常與正式刊出版本並存）：{sum(is_preprint(it) for it in items)} 筆，見 results.csv「預刊」欄",
         "取得筆數上限：" + f"{cap}" + ("（總筆數超過上限，結果被截斷，不是完整結果）" if truncated else "（未觸及上限）"),
         "類型分布：" + "；".join(f"{k} {n}" for k, n in kinds.most_common()),
     ]
@@ -77,6 +115,7 @@ def build_log(
         "",
         "備註：",
         "- 學位論文（DocID 以 U 開頭）已分流至 airitietds.com，無法用本工具讀取詳目或匯出書目。",
-        "- 本紀錄只描述這一次檢索；去重、篇名摘要篩選等後續步驟需另行記錄。",
+        "- 疑似重複只依「篇名＋作者」判斷，可能漏掉篇名改過的版本，也不保證每組都是同一篇；要保留哪一筆請自行判斷（通常保留正式刊出版本）。",
+        "- 本紀錄只描述這一次檢索；篇名摘要篩選等後續步驟需另行記錄。",
     ]
     return "\n".join(lines) + "\n"

@@ -326,6 +326,9 @@ def summary(st: RunState, folder: Path, budget_s: float | None = None) -> str:
                 f"【截斷】總筆數 {st.total} 超過 max_total={st.max_total}；"
                 "建議加關鍵字縮小範圍，或調高 max_total。"
             )
+        dups = search_export.duplicate_groups(st.search_items())
+        if dups:
+            out.append(f"疑似重複 {len(set(dups.values()))} 組、涉及 {len(dups)} 筆（篇名與作者相同、DocID 不同；未移除，見 results.csv「疑似重複組」欄與檢索紀錄）。")
         shown = st.search_items()[:5]
         out += ["", "前 5 筆："] + [f"{i}. {it.title}（DocID：{it.doc_id}）" for i, it in enumerate(shown, 1)]
     else:

@@ -10,7 +10,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from airiti_mcp.errors import AiritiNetworkError
 from airiti_mcp.parsers import SearchItem, SearchPage
-from airiti_mcp.search_export import build_csv, build_log, run_folder_name
+from airiti_mcp.search_export import build_csv, build_log, duplicate_groups, is_preprint, run_folder_name
 
 
 CRLF = chr(13) + chr(10)
@@ -342,3 +342,56 @@ async def test_over_a_real_mcp_session_ctx_is_hidden_and_progress_arrives(fake_s
     values = [e[0] for e in events]
     assert values and values == sorted(values) and len(set(values)) == len(values)
     assert events[-1][0] == events[-1][1] == 6 and any("已抓" in e[2] for e in events)
+
+
+def _it(doc_id, title, authors, source="期刊A 12卷1期 (2025/04) Pp. 39-70"):
+    return SearchItem(doc_id, title, authors, source, "期刊", f"https://x/{doc_id}", False)
+
+
+def test_duplicate_groups_flags_same_title_and_authors_only():
+    a = ["黃甲(Jia Huang)", "邱乙(Yi Chiou)"]
+    items = [
+        _it("P1", "以鷹架融入教學：個案研究", a),
+        _it("P2", "以鷹架融入教學: 個案研究", ["黃甲", "邱乙(Y. Chiou)"]),  # punctuation / romanisation differ
+        _it("P3", "以鷹架融入教學：個案研究", ["王丙"]),  # same title, different author -> a different paper
+        _it("P4", "完全不同的篇名", a),
+        _it("P5", "Scaffolding in Class", ["Lee"]),
+        _it("P6", "SCAFFOLDING  in class", ["lee"]),  # case / spacing
+        _it("P7", "", ["x"]),
+        _it("P8", "", ["x"]),  # empty titles are never grouped
+    ]
+    g = duplicate_groups(items)
+    assert g == {"P1": "D1", "P2": "D1", "P5": "D2", "P6": "D2"}
+
+
+def test_csv_marks_preprint_and_duplicate_group_without_dropping_rows():
+    final = _it("P1", "同一篇", ["甲"], "《期刊》 12卷1期 (2025/04) Pp. 39-70")
+    pre = _it("P2", "同一篇", ["甲"], "《期刊》 預刊文章 Pp. 1-32")
+    other = _it("P3", "別篇", ["乙"])
+    assert not is_preprint(final) and is_preprint(pre)
+    rows = list(csv.reader(io.StringIO(build_csv([final, pre, other]), newline="")))
+    assert rows[0][-2:] == ["預刊", "疑似重複組"] and len(rows) == 4  # nothing removed
+    assert [r[-2:] for r in rows[1:]] == [["", "D1"], ["Y", "D1"], ["", ""]]
+
+
+def test_log_reports_duplicate_groups_and_preprints():
+    from datetime import datetime
+
+    items = [_it("P1", "同一篇", ["甲"]), _it("P2", "同一篇", ["甲"], "《期刊》 預刊文章 Pp. 1-32"), _it("P3", "別篇", ["乙"])]
+    log = build_log(query="q", when=datetime(2026, 11, 6, 15, 0, 0).astimezone(), reported_total=3, fetched=3, unique=3,
+                    pages_fetched=1, page_size=20, cap=100, items=items)
+    assert "未自動移除）：1 組、涉及 2 筆" in log and "預刊文章" in log and "：1 筆，見 results.csv「預刊」欄" in log
+    clean = build_log(query="q", when=datetime(2026, 11, 6, 15, 0, 0).astimezone(), reported_total=1, fetched=1, unique=1,
+                      pages_fetched=1, page_size=20, cap=100, items=[_it("P3", "別篇", ["乙"])])
+    assert "：0 組、涉及 0 筆" in clean
+
+
+async def test_search_all_summary_mentions_suspected_duplicates(fake_site, monkeypatch):
+    state, root = fake_site
+    pair = [_it("P1", "同一篇", ["甲"]), _it("P2", "同一篇", ["甲"], "《期刊》 預刊文章 Pp. 1-32")]
+    monkeypatch.setattr(server.parsers, "parse_search", lambda html: SearchPage(total=2, items=pair))
+    out = await server.airiti_search_all("x")
+    assert "疑似重複 1 組、涉及 2 筆" in out
+    d = _only_run_dir(root)
+    assert len(_rows(d)) == 1 + 2  # both rows kept
+    assert _rows(d)[1][-1] == "D1" and _rows(d)[2][-2:] == ["Y", "D1"]
