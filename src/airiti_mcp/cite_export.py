@@ -27,6 +27,14 @@ def parse_cite_token(html: str) -> str:
     return m.group(1)
 
 
+def cite_export_error(body: str) -> str:
+    """The site's own failure message (ReturnMessage), if any, for error reporting."""
+    try:
+        return str(json.loads(body).get("ReturnMessage") or "")
+    except (ValueError, AttributeError):
+        return ""
+
+
 def parse_cite_export(body: str) -> str | None:
     """Return the export text, or None if the site reported a failure (caller may retry once).
     Raises AiritiParseError if the response is not the JSON shape we know."""

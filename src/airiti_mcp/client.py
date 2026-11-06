@@ -83,10 +83,11 @@ async def fetch_search_html(query: str, page: int, page_size: int) -> str:
         return (await _throttled(c, "POST", url)).text
 
 
-async def fetch_cite_export(doc_id: str, site_type: str) -> str:
-    """Airiti's own export (BibTeX/RIS/Endnote). Two requests: the cite window (gives the
-    anti-forgery token and sets its cookie), then the export. Returns the raw JSON body."""
-    js = quote(json.dumps([doc_id], ensure_ascii=False, separators=(",", ":")), safe="")
+async def fetch_cite_export(doc_ids: list[str], site_type: str) -> str:
+    """Airiti's own export (BibTeX/RIS/Endnote) for one or more articles in a single file.
+    Two requests: the cite window (gives the anti-forgery token and sets its cookie), then the
+    export. Returns the raw JSON body."""
+    js = quote(json.dumps(doc_ids, ensure_ascii=False, separators=(",", ":")), safe="")
     async with httpx.AsyncClient(headers=HEADERS, timeout=TIMEOUT, follow_redirects=True) as c:
         window = await _throttled(c, "POST", f"{BASE}/Article/CiteWindow", data={"jsString": js})
         token = parse_cite_token(window.text)

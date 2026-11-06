@@ -182,27 +182,38 @@ async def airiti_cite_apa(doc_id: str) -> str:
     return apa7(await _detail(doc_id))
 
 
+MAX_EXPORT = 20  # tested live with 13 at once; kept modest so one call stays fast
+
+
 @_tool
-async def airiti_export_citation(doc_id: str, format: str = "bibtex") -> str:
-    """取得華藝官方匯出的書目檔內容，可存成檔案匯入 Zotero、Mendeley、EndNote 等書目管理軟體。
+async def airiti_export_citation(doc_ids: list[str], format: str = "bibtex") -> str:
+    """取得華藝官方匯出的書目檔內容（一次可多篇，合成一個檔），可存檔匯入 Zotero、Mendeley、EndNote 等。
 
     Args:
-        doc_id: 華藝 DocID。
+        doc_ids: 華藝 DocID 清單，最多 20 個（由 airiti_search 取得）。
         format: bibtex（預設）、ris、endnote 其中之一。
     內容原樣來自華藝（含中英文關鍵字、摘要、DOI），本工具不修改；請把「```」之間的文字存成對應副檔名。
+    注意：只要清單裡有一個 DocID 無效，華藝會整批失敗且不指出是哪一個。
     """
     key = (format or "").strip().lower()
     if key not in cite_export.FORMATS:
         raise AiritiError(f"不支援的 format「{format}」。可用：{'、'.join(cite_export.FORMATS)}。")
-    doc_id = _check_doc_id(doc_id)
+    ids = list(dict.fromkeys(_check_doc_id(d) for d in (doc_ids or [])))  # de-duplicated, order kept
+    if not ids:
+        raise AiritiError("doc_ids 不能是空的。請先用 airiti_search 取得 DocID。")
+    if len(ids) > MAX_EXPORT:
+        raise AiritiError(f"一次最多 {MAX_EXPORT} 篇（收到 {len(ids)} 篇），請分批呼叫。")
     site_type, ext, desc = cite_export.FORMATS[key]
 
-    content = None
+    content, site_msg = None, ""
     for _ in range(2):  # the site was seen failing once with an empty result, then succeeding
-        content = cite_export.parse_cite_export(await client.fetch_cite_export(doc_id, site_type))
+        body = await client.fetch_cite_export(ids, site_type)
+        content = cite_export.parse_cite_export(body)
         if content:
             break
+        site_msg = cite_export.cite_export_error(body)
     if not content:
-        hint = "U 開頭多半是學位論文，華藝已分到 airitietds.com。" if re.match(r"U\d", doc_id) else "請確認 DocID 是否正確。"
-        raise AiritiError(f"華藝沒有回傳 {desc} 內容（重試一次仍失敗）。{hint}")
-    return f"{desc}，建議存成 {doc_id}.{ext}：\n```\n{content}\n```"
+        hint = "請確認每個 DocID 都正確；U 開頭多半是學位論文，華藝已分到 airitietds.com。批次失敗時可改單篇匯出找出無效的 DocID。"
+        raise AiritiError(f"華藝沒有回傳 {desc} 內容（重試一次仍失敗）。站方訊息：{site_msg or '（無）'}。{hint}")
+    name = ids[0] if len(ids) == 1 else f"airiti_export_{len(ids)}篇"
+    return f"{desc}，共 {len(ids)} 篇，建議存成 {name}.{ext}：\n```\n{content}\n```"

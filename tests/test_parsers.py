@@ -109,7 +109,7 @@ def test_apa_issue_without_volume():
 
 
 def test_cite_export_parsing():
-    from airiti_mcp.cite_export import parse_cite_export, parse_cite_token
+    from airiti_mcp.cite_export import cite_export_error, parse_cite_export, parse_cite_token
 
     assert parse_cite_token("var ajaxRequestVerificationToken_CiteWindow = 'abc:def';") == "abc:def"
     with pytest.raises(AiritiParseError):
@@ -118,6 +118,8 @@ def test_cite_export_parsing():
     assert parse_cite_export(ok) == "@article{a,}"
     # site-reported failure / empty data -> None (caller retries), not an exception
     assert parse_cite_export('{"ReturnValue":1,"ReturnData":null}') is None
+    assert cite_export_error('{"ReturnValue":1,"ReturnMessage":"處理失敗","ReturnData":null}') == "處理失敗"
+    assert cite_export_error("not json") == ""
     with pytest.raises(AiritiParseError):
         parse_cite_export("<html>not json</html>")
 
