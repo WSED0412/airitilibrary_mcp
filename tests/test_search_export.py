@@ -84,8 +84,10 @@ async def test_search_all_truncates_at_max_total(fake_site):
     d = _only_run_dir(root)
     rows = _rows(d)
     assert len(rows) == 1 + 25  # second page fetched, then cut to the cap
-    assert "結果被截斷" in (d / "search_log.txt").read_text(encoding="utf-8")
-    assert "【截斷】" in out
+    log = (d / "search_log.txt").read_text(encoding="utf-8")
+    assert "結果被截斷" in log and "【截斷】" in out
+    # the 15 rows cut by the cap are NOT duplicates: the log must say so (PRISMA numbers)
+    assert "移除 0 筆，剩 40 筆" in log and "超過上限而未納入：15 筆" in log and "納入清單（results.csv）：25 筆" in log
 
 
 async def test_search_all_keeps_partial_results_on_failure(fake_site):
@@ -105,7 +107,7 @@ async def test_search_all_dedupes_repeated_doc_ids(fake_site):
     d = _only_run_dir(root)
     ids = [r[1] for r in _rows(d)[1:]]
     assert len(ids) == len(set(ids)) == 45
-    assert "去除重複 DocID 後 45 筆" in (d / "search_log.txt").read_text(encoding="utf-8")
+    assert "移除 2 筆，剩 45 筆" in (d / "search_log.txt").read_text(encoding="utf-8")
 
 
 async def test_search_all_zero_results_writes_nothing(fake_site):
@@ -177,3 +179,70 @@ async def test_search_all_rejects_bad_export_format_before_any_request(fake_site
     with pytest.raises(ToolError):
         await server.airiti_search_all("x", export_format="pdf")
     assert list(root.iterdir()) == []
+
+
+async def test_midrun_network_failure_separates_unattempted_from_failed(fake_site, monkeypatch):
+    state, root = fake_site
+    calls = []
+
+    async def flaky(ids, site_type):
+        calls.append(len(ids))
+        if len(calls) == 2:  # second batch: network error
+            raise AiritiNetworkError("boom")
+        return json.dumps({"ReturnValue": 0, "ReturnData": {"ID": "x", "Content": "TY  - JOUR" + CRLF + "ER  - " + CRLF}})
+
+    monkeypatch.setattr(server.client, "fetch_cite_export", flaky)
+    out = await server.airiti_search_all("x", export_format="ris")
+    log = (_only_run_dir(root) / "search_log.txt").read_text(encoding="utf-8")
+    assert "匯出中斷" in log and "因中斷未處理】20 篇" in log
+    assert "匯出失敗" not in log and "DOC22" not in log  # untried ids are not listed as invalid
+    assert "成功 20 篇" in log and "因中斷未處理" in out
+
+
+async def test_isolating_a_bad_id_costs_few_requests(fake_site):
+    state, root = fake_site
+    state["bad_id"] = "DOC7"
+    await server.airiti_search_all("x", export_format="ris")
+    # batch 1: 2 tries of the whole batch + 20 single tries (one each); batch 2: 1 call
+    assert len(state["export_calls"]) == 2 + 20 + 1
+
+
+async def test_lone_bad_id_is_not_retried_again_singly(fake_site):
+    state, root = fake_site
+    state["total"] = 1
+    state["bad_id"] = "DOC0"
+    await server.airiti_search_all("x", export_format="ris")
+    assert len(state["export_calls"]) == 2  # the two batch attempts only
+    assert "匯出失敗】1 篇" in (_only_run_dir(root) / "search_log.txt").read_text(encoding="utf-8")
+
+
+async def test_export_citation_tool_validation_and_output(fake_site):
+    state, root = fake_site
+    for bad in ([], [""], [f"D{i}" for i in range(21)]):
+        with pytest.raises(ToolError):
+            await server.airiti_export_citation(bad, "ris")
+    with pytest.raises(ToolError, match="不支援"):
+        await server.airiti_export_citation(["DOC1"], "pdf")
+    out = await server.airiti_export_citation(["DOC1", "DOC2", "DOC1"], "ris")  # duplicate dropped
+    assert "共 2 篇" in out and out.count("TY  - JOUR") == 2 and state["export_calls"] == [["DOC1", "DOC2"]]
+    one = await server.airiti_export_citation("DOC9", "bibtex")  # a bare string is accepted
+    assert "共 1 篇" in one and state["export_calls"][-1] == ["DOC9"]
+
+
+async def test_export_citation_tool_reports_site_message_on_failure(fake_site):
+    state, root = fake_site
+    state["bad_id"] = "DOC1"
+    with pytest.raises(ToolError, match="處理失敗"):
+        await server.airiti_export_citation(["DOC1", "DOC2"], "ris")
+    assert len(state["export_calls"]) == 2  # one retry, then give up
+
+
+def test_export_dir_env_tolerates_quotes_and_tilde(tmp_path, monkeypatch):
+    from airiti_mcp.search_export import export_root
+
+    target = tmp_path / "My Exports"
+    monkeypatch.setenv("AIRITI_EXPORT_DIR", '"' + str(target) + '"')
+    assert export_root() == target
+    export_root().mkdir(parents=True)  # no WinError 123
+    monkeypatch.setenv("AIRITI_EXPORT_DIR", "")
+    assert export_root().name == "airiti_exports"

@@ -20,7 +20,8 @@ ENV_DIR = "AIRITI_EXPORT_DIR"
 def export_root() -> Path:
     """Where result folders are created. Fixed default in the home directory; the user can
     change it with the AIRITI_EXPORT_DIR environment variable (tools never take a path)."""
-    return Path(os.environ.get(ENV_DIR) or Path.home() / DEFAULT_DIR_NAME)
+    raw = (os.environ.get(ENV_DIR) or "").strip().strip('"').strip("'").strip()  # cmd's set VAR="x" keeps the quotes
+    return Path(raw).expanduser() if raw else Path.home() / DEFAULT_DIR_NAME
 
 
 def run_folder_name(query: str, when: datetime) -> str:
@@ -43,8 +44,9 @@ def build_csv(items: list[SearchItem]) -> str:
 def build_log(
     *, query: str, when: datetime, reported_total: int, fetched: int, unique: int,
     pages_fetched: int, page_size: int, cap: int, items: list[SearchItem], error: str = "",
-    export_lines: list[str] | None = None,
+    export_lines: list[str] | None = None, deduped: int | None = None,
 ) -> str:
+    deduped = unique if deduped is None else deduped
     truncated = reported_total > cap
     kinds = Counter(it.kind or "（未標示）" for it in items)
     lines = [
@@ -58,7 +60,10 @@ def build_log(
         "篩選條件：無（未限制年份、文獻類型、期刊）",
         "",
         f"華藝回報總筆數：{reported_total}",
-        f"本次實際取得：{fetched} 筆（去除重複 DocID 後 {unique} 筆；每頁 {page_size} 筆，共抓 {pages_fetched} 頁）",
+        f"本次實際取得：{fetched} 筆（每頁 {page_size} 筆，共抓 {pages_fetched} 頁）",
+        f"去除重複 DocID：移除 {fetched - deduped} 筆，剩 {deduped} 筆",
+        f"超過上限而未納入：{deduped - unique} 筆（不是重複）" if deduped > unique else "超過上限而未納入：0 筆",
+        f"納入清單（results.csv）：{unique} 筆",
         "取得筆數上限：" + f"{cap}" + ("（總筆數超過上限，結果被截斷，不是完整結果）" if truncated else "（未觸及上限）"),
         "類型分布：" + "；".join(f"{k} {n}" for k, n in kinds.most_common()),
     ]

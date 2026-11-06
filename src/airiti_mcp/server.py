@@ -203,11 +203,11 @@ def _is_thesis(it: parsers.SearchItem) -> bool:
 
 
 @_tool
-async def airiti_export_citation(doc_ids: list[str], format: str = "bibtex") -> str:
+async def airiti_export_citation(doc_ids: list[str] | str, format: str = "bibtex") -> str:
     """取得華藝官方匯出的書目檔內容（一次可多篇，合成一個檔），可存檔匯入 Zotero、Mendeley、EndNote 等。
 
     Args:
-        doc_ids: 華藝 DocID 清單，最多 20 個（由 airiti_search 取得）。
+        doc_ids: 華藝 DocID 清單，最多 20 個（由 airiti_search 取得）；只匯出一篇時也可直接傳一個字串。
         format: bibtex（預設）、ris、endnote 其中之一。
     內容原樣來自華藝（含中英文關鍵字、摘要、DOI），本工具不修改；請把「```」之間的文字存成對應副檔名。
     注意：只要清單裡有一個 DocID 無效，華藝會整批失敗且不指出是哪一個。
@@ -215,6 +215,8 @@ async def airiti_export_citation(doc_ids: list[str], format: str = "bibtex") -> 
     key = (format or "").strip().lower()
     if key not in cite_export.FORMATS:
         raise AiritiError(f"不支援的 format「{format}」。可用：{'、'.join(cite_export.FORMATS)}。")
+    if isinstance(doc_ids, str):
+        doc_ids = [doc_ids]
     ids = list(dict.fromkeys(_check_doc_id(d) for d in (doc_ids or [])))  # de-duplicated, order kept
     if not ids:
         raise AiritiError("doc_ids 不能是空的。請先用 airiti_search 取得 DocID。")
@@ -282,7 +284,8 @@ async def airiti_search_all(query: str, max_total: int = MAX_TOTAL_DEFAULT, expo
         fetched += len(res.items)
         items += res.items
     seen: set[str] = set()
-    unique_items = [it for it in items if not (it.doc_id in seen or seen.add(it.doc_id))][:max_total]
+    deduped = [it for it in items if not (it.doc_id in seen or seen.add(it.doc_id))]
+    unique_items = deduped[:max_total]
 
     folder = search_export.export_root() / search_export.run_folder_name(query, when)
     folder.mkdir(parents=True, exist_ok=True)
@@ -298,6 +301,7 @@ async def airiti_search_all(query: str, max_total: int = MAX_TOTAL_DEFAULT, expo
         parts: list[str] = []
         done: set[str] = set()  # DocIDs that made it into the file
         failed: list[str] = []
+        unattempted: list[str] = []  # never requested because the run stopped early
         for k in range(0, len(ids), MAX_EXPORT):
             batch = ids[k : k + MAX_EXPORT]
             try:
@@ -306,15 +310,18 @@ async def airiti_search_all(query: str, max_total: int = MAX_TOTAL_DEFAULT, expo
                     parts.append(content)
                     done.update(batch)
                     continue
-                for one in batch:  # one invalid DocID fails the whole batch: retry singly to isolate it
-                    c, _ = await _export_ids([one], site_type)
+                if len(batch) == 1:  # already tried twice; nothing left to isolate
+                    failed.append(batch[0])
+                    continue
+                for one in batch:  # one invalid DocID fails the whole batch: retry singly (once) to isolate it
+                    c, _ = await _export_ids([one], site_type, attempts=1)
                     if c:
                         parts.append(c)
                         done.add(one)
                     else:
                         failed.append(one)
             except AiritiError as e:  # network/parse trouble: stop, keep what was exported
-                failed += [i for i in ids[k:] if i not in done and i not in failed]
+                unattempted = [i for i in ids[k:] if i not in done and i not in failed]
                 export_problem = f"{type(e).__name__}: {e}"
                 break
         exported = len(done)
@@ -327,14 +334,17 @@ async def airiti_search_all(query: str, max_total: int = MAX_TOTAL_DEFAULT, expo
             f"  略過學位論文 {skipped} 篇（無法匯出）",
         ]
         if failed:
-            export_lines.append(f"  【匯出失敗】{len(failed)} 篇：{'、'.join(failed)}")
+            shown = '、'.join(failed[:20]) + (f"…（另 {len(failed) - 20} 篇見匯出前的清單）" if len(failed) > 20 else "")
+            export_lines.append(f"  【匯出失敗】{len(failed)} 篇（華藝拒絕這些 DocID）：{shown}")
+        if unattempted:
+            export_lines.append(f"  【因中斷未處理】{len(unattempted)} 篇（沒有發出匯出請求，不代表 DocID 無效）")
         if export_problem:
             export_lines.append(f"  【匯出中斷】{export_problem}")
     with csv_path.open("w", encoding="utf-8-sig", newline="") as f:  # utf-8-sig: BOM so Excel reads UTF-8
         f.write(search_export.build_csv(unique_items))
     log_path.write_text(
         search_export.build_log(
-            query=query, when=when, reported_total=total, fetched=fetched, unique=len(unique_items),
+            query=query, when=when, reported_total=total, fetched=fetched, deduped=len(deduped), unique=len(unique_items),
             pages_fetched=pages_fetched, page_size=MAX_PAGE_SIZE, cap=max_total, items=unique_items, error=error,
             export_lines=export_lines,
         ),
