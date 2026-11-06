@@ -598,7 +598,8 @@ async def test_export_citation_save_writes_a_file_and_keeps_content_out_of_the_r
     raw = (d / "export.ris").read_bytes().decode("utf-8")
     assert raw.count("TY  - JOUR") == 2 and raw.count("ER  - " + CRLF) == 2 and raw.endswith(CRLF)
     assert not (d / "state.json").exists()  # a one-shot export is not a resumable run
-    # a second save in the same second never reuses or overwrites the first folder
+    # a different export (other id count -> other folder name) gets its own folder and leaves the first alone
+    # (the real same-name collision is covered by test_export_folder_name_collision_gets_a_suffix)
     await server.airiti_export_citation(["DOC3"], "bibtex", save=True)
     assert len(_run_dirs(root)) == 2
     assert (d / "export.ris").read_bytes().decode("utf-8") == raw
@@ -647,3 +648,81 @@ async def test_export_path_completes_relative_urls_end_to_end(fake_site, monkeyp
     merged = (d / "export.ris").read_bytes().decode("utf-8")
     assert merged.count("UR  - https://www.airitilibrary.com/Article/") == 40 and "UR  - Article/" not in merged
     assert "已補成完整網址" in (d / "search_log.txt").read_text(encoding="utf-8")
+
+
+async def test_export_folder_name_collision_gets_a_suffix(fake_site, monkeypatch):
+    from datetime import datetime as real_datetime
+
+    class Frozen(real_datetime):  # two saves in "the same second" without depending on the wall clock
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime(2026, 11, 6, 15, 0, 0)
+
+    monkeypatch.setattr(server, "datetime", Frozen)
+    state, root = fake_site
+    first = await server.airiti_export_citation(["DOC1"], "ris", save=True)
+    second = await server.airiti_export_citation(["DOC2"], "ris", save=True)  # same id count -> same folder name
+    names = sorted(p.name for p in _run_dirs(root))
+    assert len(names) == 2 and names[0].endswith("_export_1") and names[1].endswith("_export_1_2")
+    assert (root / names[0] / "export.ris").read_bytes().decode("utf-8").count("T1  - DOC1") == 1  # not overwritten
+    assert (root / names[1] / "export.ris").read_bytes().decode("utf-8").count("T1  - DOC2") == 1
+    assert names[0] in first and names[1] in second
+
+
+async def test_export_citation_save_cleans_up_when_writing_fails(fake_site, monkeypatch):
+    from pathlib import Path
+
+    state, root = fake_site
+    real_open = Path.open
+
+    def full_disk(self, mode="r", *a, **k):
+        if "w" in mode and self.name == "export.ris":
+            raise OSError(28, "No space left on device")
+        return real_open(self, mode, *a, **k)
+
+    monkeypatch.setattr(Path, "open", full_disk)
+    with pytest.raises(OSError):
+        await server.airiti_export_citation(["DOC1"], "ris", save=True)
+    assert _run_dirs(root) == []  # no empty folder left behind
+
+
+async def test_save_true_writes_absolute_urls_to_disk(fake_site, monkeypatch):
+    state, root = fake_site
+
+    async def no_doi(ids, site_type):
+        content = "".join("TY  - JOUR" + CRLF + "UR  - Article/Detail?docID=" + i + CRLF + "ER  - " + CRLF + CRLF for i in ids)
+        return json.dumps({"ReturnValue": 0, "ReturnData": {"ID": "x", "Content": content}})
+
+    monkeypatch.setattr(server.client, "fetch_cite_export", no_doi)
+    await server.airiti_export_citation(["DOC1"], "ris", save=True)
+    raw = (_only_run_dir(root) / "export.ris").read_bytes().decode("utf-8")
+    assert "UR  - https://www.airitilibrary.com/Article/Detail?docID=DOC1" + CRLF in raw and "UR  - Article/" not in raw
+
+
+async def test_only_ris_content_gets_urls_rewritten(fake_site, monkeypatch):
+    state, root = fake_site
+    # a BibTeX / EndNote body whose text happens to contain a line shaped like an RIS UR line
+    odd = "@article{a," + CRLF + "abstract ={first" + CRLF + "UR  - Article/Detail?docID=Z" + CRLF + "},}" + CRLF
+
+    async def serve(ids, site_type):
+        return json.dumps({"ReturnValue": 0, "ReturnData": {"ID": "x", "Content": odd}})
+
+    monkeypatch.setattr(server.client, "fetch_cite_export", serve)
+    bib, _ = await harvest.export_ids(["DOC1"], "BibTeX")
+    enw, _ = await harvest.export_ids(["DOC1"], "Endnote")
+    ris, _ = await harvest.export_ids(["DOC1"], "RIS")
+    assert "UR  - Article/Detail?docID=Z" in bib and "UR  - Article/Detail?docID=Z" in enw  # untouched
+    assert "UR  - https://www.airitilibrary.com/Article/Detail?docID=Z" in ris
+
+
+async def test_log_has_no_url_note_when_nothing_was_exported(fake_site, monkeypatch):
+    state, root = fake_site
+    state["total"] = 1
+
+    async def refuse(ids, site_type):
+        return json.dumps({"ReturnValue": 1, "ReturnMessage": "no", "ReturnData": None})
+
+    monkeypatch.setattr(server.client, "fetch_cite_export", refuse)
+    await server.airiti_search_all("x", export_format="ris")
+    log = (_only_run_dir(root) / "search_log.txt").read_text(encoding="utf-8")
+    assert "未產生檔案" in log and "已補成完整網址" not in log

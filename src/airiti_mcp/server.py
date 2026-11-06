@@ -218,8 +218,16 @@ async def airiti_export_citation(doc_ids: list[str] | str, format: str = "bibtex
     if save:
         folder = search_export.make_export_folder(f"export_{len(ids)}", datetime.now().astimezone())
         path = folder / f"export.{ext}"
-        with path.open("w", encoding="utf-8", newline="") as f:
-            f.write(content + "\r\n")
+        try:
+            with path.open("w", encoding="utf-8", newline="") as f:
+                f.write(content + "\r\n")
+        except BaseException:  # disk full, permission, ... : leave nothing behind, then let the error through
+            path.unlink(missing_ok=True)
+            try:
+                folder.rmdir()
+            except OSError:
+                pass
+            raise
         return f"{desc}，共 {len(ids)} 篇，已存檔（內容沒有放進對話）：{path}"
     name = ids[0] if len(ids) == 1 else f"airiti_export_{len(ids)}篇"
     return f"{desc}，共 {len(ids)} 篇，建議存成 {name}.{ext}：\n```\n{content}\n```"
