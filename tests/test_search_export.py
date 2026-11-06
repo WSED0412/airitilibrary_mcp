@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from airiti_mcp import server
+from airiti_mcp import harvest, server
 from mcp.server.mcpserver.exceptions import ToolError
 
 from airiti_mcp.errors import AiritiNetworkError
@@ -26,9 +26,14 @@ def fake_site(monkeypatch, tmp_path):
     """total results served 20 per page; `fail_page` raises a network error; `overlap` repeats the
     last item of each page at the start of the next (the site can shift results between requests)."""
     monkeypatch.setenv("AIRITI_EXPORT_DIR", str(tmp_path))
-    state = {"total": 45, "fail_page": None, "overlap": False, "bad_id": None, "export_calls": []}
+    state = {"total": 45, "fail_page": None, "overlap": False, "bad_id": None, "export_calls": [],
+             "step": 0.0, "export_step": 0.0, "pages": []}
+    clock = {"t": 0.0}  # fake time for the pause/resume tests: each request advances it by step / export_step
+    monkeypatch.setattr(harvest, "_now", lambda: clock["t"])
 
     async def fetch(query, page, page_size):
+        state["pages"].append(page)
+        clock["t"] += state["step"]
         if state["fail_page"] == page:
             raise AiritiNetworkError("boom")
         return str(page)
@@ -43,6 +48,7 @@ def fake_site(monkeypatch, tmp_path):
 
     async def fake_export(ids, site_type):
         state["export_calls"].append(list(ids))
+        clock["t"] += state["export_step"]
         if state["bad_id"] in ids:  # the real site fails the whole batch and does not say which id
             return json.dumps({"ReturnValue": 1, "ReturnMessage": "處理失敗", "ReturnData": None})
         content = "".join(f"TY  - JOUR{CRLF}T1  - {i}{CRLF}ER  - {CRLF}{CRLF}" for i in ids)
@@ -246,3 +252,93 @@ def test_export_dir_env_tolerates_quotes_and_tilde(tmp_path, monkeypatch):
     export_root().mkdir(parents=True)  # no WinError 123
     monkeypatch.setenv("AIRITI_EXPORT_DIR", "")
     assert export_root().name == "airiti_exports"
+
+
+def _run_dirs(root):
+    return [d for d in root.iterdir() if d.is_dir()]
+
+
+async def test_pauses_in_harvest_then_resumes_without_refetching(fake_site):
+    state, root = fake_site
+    state["step"] = 50.0  # every page "takes" 50 s; budget is 10 s
+    first = await server.airiti_search_all("x", time_budget_s=10)
+    d = _only_run_dir(root)
+    assert "已暫停" in first and f'resume="{d.name}"' in first and "抓取結果頁 2/3" in first
+    assert (d / "state.json").exists() and (d / "results.csv").exists()
+    assert not (d / "search_log.txt").exists()  # the log is written when the run is complete
+    assert len(_rows(d)) == 1 + 40  # provisional list so far
+
+    second = await server.airiti_search_all(resume=d.name, time_budget_s=10)
+    assert "已暫停" not in second and "共 45 筆" in second
+    assert state["pages"] == [1, 2, 3]  # nothing fetched twice
+    assert len(_rows(d)) == 1 + 45
+    log = (d / "search_log.txt").read_text(encoding="utf-8")
+    assert "分 2 次呼叫完成" in log
+
+    third = await server.airiti_search_all(resume=d.name)  # finished run: just shows the result again
+    assert "共 45 筆" in third and state["pages"] == [1, 2, 3]
+
+
+async def test_pauses_in_export_then_resumes_without_duplicates(fake_site):
+    state, root = fake_site
+    state["export_step"] = 50.0
+    first = await server.airiti_search_all("x", export_format="ris", time_budget_s=10)
+    d = _only_run_dir(root)
+    assert "已暫停" in first and "匯出書目 20/40" in first
+    assert (d / "export.ris").read_bytes().decode("utf-8").count("TY  - JOUR") == 20
+
+    second = await server.airiti_search_all(resume=d.name, time_budget_s=10)
+    assert "已暫停" not in second
+    text = (d / "export.ris").read_bytes().decode("utf-8")
+    titles = [l for l in text.split(CRLF) if l.startswith("T1  - ")]
+    assert len(titles) == 40 == len(set(titles))  # every exportable result exactly once
+    assert "成功 40 篇" in (d / "search_log.txt").read_text(encoding="utf-8")
+    assert [len(c) for c in state["export_calls"]] == [20, 20]
+
+
+async def test_resume_rejects_paths_and_unknown_runs(fake_site):
+    state, root = fake_site
+    for bad in ("../x", "a/b", "a" + chr(92) + "b", "C:x", "..", "no_such_run"):
+        with pytest.raises(ToolError):
+            await server.airiti_search_all(resume=bad)
+    for bad_budget in (5, 901):
+        with pytest.raises(ToolError, match="time_budget_s"):
+            await server.airiti_search_all("x", time_budget_s=bad_budget)
+    assert state["pages"] == []  # all rejected before any request
+
+
+async def test_engine_reports_monotonic_progress(fake_site, tmp_path):
+    state, root = fake_site
+    st, _ = await harvest.start_run("x", 1000, "ris")
+    folder = tmp_path / "run"
+    folder.mkdir()
+    seen = []
+
+    async def progress(done, total, message):
+        seen.append((done, total, message))
+
+    assert await harvest.advance(st, folder, 90, progress) is True
+    values = [d for d, _, _ in seen]
+    assert values == sorted(values) and len(set(values)) == len(values)  # strictly increasing
+    assert seen[-1][:2] == (6.0, 6) and all(t == 6 for _, t, _ in seen)  # 3 pages + 3 batch-units
+    assert any("已抓" in m for _, _, m in seen) and any("已匯出" in m for _, _, m in seen)
+
+
+async def test_over_a_real_mcp_session_ctx_is_hidden_and_progress_arrives(fake_site):
+    from mcp.client import Client
+
+    state, root = fake_site
+    events = []
+
+    async def on_progress(progress, total, message):
+        events.append((progress, total, message))
+
+    async with Client(server.mcp) as c:
+        tool = next(t for t in (await c.list_tools()).tools if t.name == "airiti_search_all")
+        props = tool.input_schema["properties"] if hasattr(tool, "input_schema") else tool.inputSchema["properties"]
+        assert "ctx" not in props and {"resume", "time_budget_s", "export_format"} <= set(props)
+        result = await c.call_tool("airiti_search_all", {"query": "x", "export_format": "ris"}, progress_callback=on_progress)
+    assert "共 45 筆" in str(result)
+    values = [e[0] for e in events]
+    assert values and values == sorted(values) and len(set(values)) == len(values)
+    assert events[-1][0] == events[-1][1] == 6 and any("已抓" in e[2] for e in events)

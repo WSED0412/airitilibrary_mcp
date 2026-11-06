@@ -44,7 +44,7 @@ def build_csv(items: list[SearchItem]) -> str:
 def build_log(
     *, query: str, when: datetime, reported_total: int, fetched: int, unique: int,
     pages_fetched: int, page_size: int, cap: int, items: list[SearchItem], error: str = "",
-    export_lines: list[str] | None = None, deduped: int | None = None,
+    export_lines: list[str] | None = None, deduped: int | None = None, run_note: str = "",
 ) -> str:
     deduped = unique if deduped is None else deduped
     truncated = reported_total > cap
@@ -67,6 +67,8 @@ def build_log(
         "取得筆數上限：" + f"{cap}" + ("（總筆數超過上限，結果被截斷，不是完整結果）" if truncated else "（未觸及上限）"),
         "類型分布：" + "；".join(f"{k} {n}" for k, n in kinds.most_common()),
     ]
+    if run_note:
+        lines.append(run_note)
     if export_lines:
         lines += [""] + export_lines
     if error:

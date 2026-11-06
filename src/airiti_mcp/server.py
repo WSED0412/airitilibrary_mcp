@@ -7,10 +7,10 @@ import logging
 import re
 from datetime import datetime
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from . import cite_export, client, hints, parsers, search_export
+from . import cite_export, client, harvest, hints, parsers, search_export
 from .cite import apa7
 from .errors import AiritiError, AiritiParseError
 
@@ -183,23 +183,7 @@ async def airiti_cite_apa(doc_id: str) -> str:
     return apa7(await _detail(doc_id))
 
 
-MAX_EXPORT = 20  # tested live with 13 at once; kept modest so one call stays fast
-
-
-async def _export_ids(ids: list[str], site_type: str, attempts: int = 2) -> tuple[str | None, str]:
-    """One export call, retried (the site was seen failing once with an empty result, then succeeding)."""
-    site_msg = ""
-    for _ in range(attempts):
-        body = await client.fetch_cite_export(ids, site_type)
-        content = cite_export.parse_cite_export(body)
-        if content:
-            return content, ""
-        site_msg = cite_export.cite_export_error(body)
-    return None, site_msg
-
-
-def _is_thesis(it: parsers.SearchItem) -> bool:
-    return "學位論文" in (it.kind or "") or bool(re.match(r"U\d", it.doc_id))
+MAX_EXPORT = harvest.MAX_EXPORT
 
 
 @_tool
@@ -224,7 +208,7 @@ async def airiti_export_citation(doc_ids: list[str] | str, format: str = "bibtex
         raise AiritiError(f"一次最多 {MAX_EXPORT} 篇（收到 {len(ids)} 篇），請分批呼叫。")
     site_type, ext, desc = cite_export.FORMATS[key]
 
-    content, site_msg = await _export_ids(ids, site_type)
+    content, site_msg = await harvest.export_ids(ids, site_type)
     if not content:
         hint = "請確認每個 DocID 都正確；U 開頭多半是學位論文，華藝已分到 airitietds.com。批次失敗時可改單篇匯出找出無效的 DocID。"
         raise AiritiError(f"華藝沒有回傳 {desc} 內容（重試一次仍失敗）。站方訊息：{site_msg or '（無）'}。{hint}")
@@ -234,132 +218,63 @@ async def airiti_export_citation(doc_ids: list[str] | str, format: str = "bibtex
 
 MAX_TOTAL_DEFAULT = 1000
 MAX_TOTAL_LIMIT = 2000
+DEFAULT_BUDGET_S = 90  # stay under the ~2 min mark where clients start backgrounding or timing out tool calls
+MIN_BUDGET_S, MAX_BUDGET_S = 10, 900
 
 
 @_tool
-async def airiti_search_all(query: str, max_total: int = MAX_TOTAL_DEFAULT, export_format: str = "") -> str:
+async def airiti_search_all(
+    query: str = "",
+    max_total: int = MAX_TOTAL_DEFAULT,
+    export_format: str = "",
+    resume: str = "",
+    time_budget_s: int = DEFAULT_BUDGET_S,
+    ctx: Context | None = None,
+) -> str:
     """抓完一個查詢的所有結果頁，存成 CSV 清單與檢索紀錄檔（適合系統性文獻回顧）。
 
     Args:
-        query: 搜尋關鍵字，空白分隔（每個詞都要符合），例如「鷹架 數學解題」。
+        query: 搜尋關鍵字，空白分隔（每個詞都要符合），例如「鷹架 數學解題」。續跑時不用填。
         max_total: 最多取得幾筆，1–2000，預設 1000；總筆數超過時結果會被截斷，紀錄檔會註明。
         export_format: 選填，bibtex／ris／endnote 其中之一；填了會把可匯出的文獻（學位論文除外）每 20 篇一批
-            向華藝匯出，合併成同一資料夾裡的一個檔（export.bib／export.ris／export.enw）。預設空白＝不匯出。
-            每 20 篇約多花 3 秒；若某批失敗會逐篇重試以找出無效的 DocID，並記在檢索紀錄。
+            向華藝匯出，合併成同資料夾裡的一個檔（export.bib／export.ris／export.enw）。預設空白＝不匯出。
+        resume: 續跑用。若上次回傳【已暫停】，把它給的資料夾名稱填在這裡再呼叫一次，其他參數不用重填。
+        time_budget_s: 單次呼叫最多工作幾秒（10–900，預設 90）。時間到會乾淨暫停並存下進度，避免被客戶端逾時中斷；
+            量大時會分成多次呼叫，請重複呼叫直到不再出現【已暫停】。
     檔案寫到固定資料夾（預設為使用者家目錄下的 airiti_exports，可用環境變數 AIRITI_EXPORT_DIR 更改），
-    每次檢索一個新的子資料夾。只回傳摘要與檔案路徑，不把全部結果放進對話；
+    每次檢索一個新的子資料夾（含 state.json 進度檔）。只回傳摘要與檔案路徑，不把全部結果放進對話；
     只想匯出特定幾篇時，可改用 airiti_export_citation。
     """
-    query = (query or "").strip()
-    if not query:
-        raise AiritiError("query 不能是空的。")
-    if not 1 <= max_total <= MAX_TOTAL_LIMIT:
-        raise AiritiError(f"max_total 必須介於 1 到 {MAX_TOTAL_LIMIT}。")
-    export_key = (export_format or "").strip().lower()
-    if export_key and export_key not in cite_export.FORMATS:
-        raise AiritiError(f"不支援的 export_format「{export_format}」。可用：{'、'.join(cite_export.FORMATS)}，或留空不匯出。")
+    if not MIN_BUDGET_S <= time_budget_s <= MAX_BUDGET_S:
+        raise AiritiError(f"time_budget_s 必須介於 {MIN_BUDGET_S} 到 {MAX_BUDGET_S}。")
 
-    when = datetime.now().astimezone()
-    items: list[parsers.SearchItem] = []
-    fetched = pages_fetched = 0
-    error = ""
-    first = parsers.parse_search(await client.fetch_search_html(query, 1, MAX_PAGE_SIZE))
-    total = first.total
-    if total == 0:
-        return (
-            f"查詢「{query}」：華藝回報 0 筆結果，沒有產生檔案。\n" + hints.few_results_hint(query, 0)
-        )
-    pages_fetched, fetched, items = 1, len(first.items), list(first.items)
-    pages_needed = -(-min(total, max_total) // MAX_PAGE_SIZE)
-    for page in range(2, pages_needed + 1):
-        try:
-            res = parsers.parse_search(await client.fetch_search_html(query, page, MAX_PAGE_SIZE))
-        except AiritiError as e:  # keep what we have; the log says the run is incomplete
-            error = f"第 {page} 頁：{type(e).__name__}: {e}"
-            break
-        if not res.items:
-            error = f"第 {page} 頁沒有項目（華藝回報 {res.total} 筆），提前停止。"
-            break
-        pages_fetched += 1
-        fetched += len(res.items)
-        items += res.items
-    seen: set[str] = set()
-    deduped = [it for it in items if not (it.doc_id in seen or seen.add(it.doc_id))]
-    unique_items = deduped[:max_total]
-
-    folder = search_export.export_root() / search_export.run_folder_name(query, when)
-    folder.mkdir(parents=True, exist_ok=True)
-    csv_path, log_path = folder / "results.csv", folder / "search_log.txt"
-
-    export_lines: list[str] = []
-    export_path = None
-    export_problem = ""
-    if export_key:
-        site_type, ext, desc = cite_export.FORMATS[export_key]
-        ids = [it.doc_id for it in unique_items if not _is_thesis(it)]
-        skipped = len(unique_items) - len(ids)
-        parts: list[str] = []
-        done: set[str] = set()  # DocIDs that made it into the file
-        failed: list[str] = []
-        unattempted: list[str] = []  # never requested because the run stopped early
-        for k in range(0, len(ids), MAX_EXPORT):
-            batch = ids[k : k + MAX_EXPORT]
+    async def progress(done: float, total: float | None, message: str) -> None:
+        if ctx is not None:  # a no-op on the wire unless the client asked for progress
             try:
-                content, _ = await _export_ids(batch, site_type)
-                if content:
-                    parts.append(content)
-                    done.update(batch)
-                    continue
-                if len(batch) == 1:  # already tried twice; nothing left to isolate
-                    failed.append(batch[0])
-                    continue
-                for one in batch:  # one invalid DocID fails the whole batch: retry singly (once) to isolate it
-                    c, _ = await _export_ids([one], site_type, attempts=1)
-                    if c:
-                        parts.append(c)
-                        done.add(one)
-                    else:
-                        failed.append(one)
-            except AiritiError as e:  # network/parse trouble: stop, keep what was exported
-                unattempted = [i for i in ids[k:] if i not in done and i not in failed]
-                export_problem = f"{type(e).__name__}: {e}"
-                break
-        exported = len(done)
-        if parts:
-            export_path = folder / f"export.{ext}"
-            with export_path.open("w", encoding="utf-8", newline="") as f:
-                f.write("\r\n\r\n".join(parts) + "\r\n")
-        export_lines = [
-            f"書目匯出：{desc}，成功 {exported} 篇 → {export_path.name if export_path else '（未產生檔案）'}",
-            f"  略過學位論文 {skipped} 篇（無法匯出）",
-        ]
-        if failed:
-            shown = '、'.join(failed[:20]) + (f"…（另 {len(failed) - 20} 篇見匯出前的清單）" if len(failed) > 20 else "")
-            export_lines.append(f"  【匯出失敗】{len(failed)} 篇（華藝拒絕這些 DocID）：{shown}")
-        if unattempted:
-            export_lines.append(f"  【因中斷未處理】{len(unattempted)} 篇（沒有發出匯出請求，不代表 DocID 無效）")
-        if export_problem:
-            export_lines.append(f"  【匯出中斷】{export_problem}")
-    with csv_path.open("w", encoding="utf-8-sig", newline="") as f:  # utf-8-sig: BOM so Excel reads UTF-8
-        f.write(search_export.build_csv(unique_items))
-    log_path.write_text(
-        search_export.build_log(
-            query=query, when=when, reported_total=total, fetched=fetched, deduped=len(deduped), unique=len(unique_items),
-            pages_fetched=pages_fetched, page_size=MAX_PAGE_SIZE, cap=max_total, items=unique_items, error=error,
-            export_lines=export_lines,
-        ),
-        encoding="utf-8",
-    )
-    out = [
-        f"查詢「{query}」：華藝回報共 {total} 筆；取得 {len(unique_items)} 筆（{pages_fetched} 頁）。",
-        f"清單：{csv_path}",
-        f"檢索紀錄：{log_path}",
-    ]
-    if export_key:
-        out += [f"書目檔：{export_path}" if export_path else "書目檔：（未產生）"] + [l.strip() for l in export_lines]
-    if error:
-        out.append(f"【不完整】抓取中途失敗，已存下已取得的部分。{error}")
-    if total > max_total:
-        out.append(f"【截斷】總筆數 {total} 超過 max_total={max_total}；建議加關鍵字縮小範圍，或調高 max_total（上限 {MAX_TOTAL_LIMIT}）。")
-    out += ["", "前 5 筆："] + [f"{i}. {it.title}（DocID：{it.doc_id}）" for i, it in enumerate(unique_items[:5], 1)]
-    return "\n".join(out)
+                await ctx.report_progress(done, total, message)
+            except Exception:  # progress is a courtesy; never let it kill a long run
+                logging.getLogger(__name__).debug("progress report failed", exc_info=True)
+
+    if resume.strip():
+        folder = harvest.resolve_run_folder(resume)
+        st = harvest.load_state(folder)
+        if st.finished:  # nothing left to do: show the result again
+            return harvest.summary(st, folder)
+    else:
+        query = (query or "").strip()
+        if not query:
+            raise AiritiError("query 不能是空的（若要續跑，請填 resume）。")
+        if not 1 <= max_total <= MAX_TOTAL_LIMIT:
+            raise AiritiError(f"max_total 必須介於 1 到 {MAX_TOTAL_LIMIT}。")
+        export_key = (export_format or "").strip().lower()
+        if export_key and export_key not in cite_export.FORMATS:
+            raise AiritiError(f"不支援的 export_format「{export_format}」。可用：{'、'.join(cite_export.FORMATS)}，或留空不匯出。")
+        st, hint = await harvest.start_run(query, max_total, export_key)
+        if st is None:
+            return f"查詢「{query}」：華藝回報 0 筆結果，沒有產生檔案。\n" + hint
+        folder = search_export.export_root() / search_export.run_folder_name(query, datetime.fromisoformat(st.started))
+        folder.mkdir(parents=True, exist_ok=True)
+        harvest.save_state(st, folder)
+
+    finished = await harvest.advance(st, folder, time_budget_s, progress)
+    return harvest.summary(st, folder, None if finished else time_budget_s)
