@@ -17,6 +17,16 @@ FORMATS = {
     "endnote": ("Endnote", "enw", "EndNote 匯入格式（.enw）"),
 }
 
+# RIS only: for records without a DOI Airiti writes "UR  - Article/Detail?docID=..." (no host), a dead link
+# once imported into a reference manager. BibTeX / EndNote exports carry no URL field, so nothing to fix there.
+_RELATIVE_UR = re.compile(r"^(UR  - )(/?Article/[^\r\n]*)", re.M)  # no "$": lines end in CRLF
+
+
+def absolutize_urls(content: str, base: str) -> str:
+    """Make relative `UR` lines in RIS content absolute. Every other byte is left as Airiti sent it."""
+    return _RELATIVE_UR.sub(lambda m: m.group(1) + base.rstrip("/") + "/" + m.group(2).lstrip("/"), content)
+
+
 _TOKEN = re.compile(r"ajaxRequestVerificationToken_CiteWindow\s*=\s*'([^']+)'")
 
 
@@ -46,4 +56,5 @@ def parse_cite_export(body: str) -> str | None:
         raise AiritiParseError(f"CiteExport 回應不是預期的 JSON 結構：{body[:120]!r}") from e
     if not ok or not isinstance(data, dict) or not data.get("Content"):
         return None
-    return data["Content"].strip()
+    # trim the blank lines around the file but keep trailing spaces: RIS ends with the line "ER  - "
+    return data["Content"].lstrip().rstrip("\r\n")

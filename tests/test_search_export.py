@@ -573,3 +573,77 @@ def test_state_file_version_is_checked(tmp_path):
     (folder / "state.json").write_text("[1, 2]", encoding="utf-8")
     with pytest.raises(AiritiError, match="讀不到"):
         harvest.load_state(folder)
+
+
+def test_cite_export_keeps_the_trailing_space_of_the_ris_end_tag():
+    from airiti_mcp.cite_export import parse_cite_export
+
+    body = json.dumps({"ReturnValue": 0, "ReturnData": {"ID": "x", "Content": "TY  - JOUR" + CRLF + "ER  - " + CRLF + CRLF}})
+    assert parse_cite_export(body) == "TY  - JOUR" + CRLF + "ER  - "  # was "ER  -" before
+
+
+async def test_merged_ris_keeps_every_end_tag_intact(fake_site):
+    state, root = fake_site
+    await server.airiti_search_all("x", export_format="ris")
+    text = (_only_run_dir(root) / "export.ris").read_bytes().decode("utf-8")
+    assert text.count("ER  - " + CRLF) == text.count("TY  - JOUR") == 40  # last record of each batch included
+
+
+async def test_export_citation_save_writes_a_file_and_keeps_content_out_of_the_reply(fake_site):
+    state, root = fake_site
+    out = await server.airiti_export_citation(["DOC1", "DOC2"], "ris", save=True)
+    assert "TY  - JOUR" not in out and "共 2 篇" in out and "已存檔" in out
+    d = _only_run_dir(root)
+    assert str(d / "export.ris") in out and d.parent == root and "export_2" in d.name
+    raw = (d / "export.ris").read_bytes().decode("utf-8")
+    assert raw.count("TY  - JOUR") == 2 and raw.count("ER  - " + CRLF) == 2 and raw.endswith(CRLF)
+    assert not (d / "state.json").exists()  # a one-shot export is not a resumable run
+    # a second save in the same second never reuses or overwrites the first folder
+    await server.airiti_export_citation(["DOC3"], "bibtex", save=True)
+    assert len(_run_dirs(root)) == 2
+    assert (d / "export.ris").read_bytes().decode("utf-8") == raw
+    # default behaviour is unchanged: the text comes back in the reply and nothing new is written
+    inline = await server.airiti_export_citation(["DOC1"], "ris")
+    assert "TY  - JOUR" in inline and len(_run_dirs(root)) == 2
+
+
+async def test_export_citation_save_failure_writes_nothing(fake_site):
+    state, root = fake_site
+    state["bad_id"] = "DOC1"
+    with pytest.raises(ToolError, match="處理失敗"):
+        await server.airiti_export_citation(["DOC1"], "ris", save=True)
+    assert _run_dirs(root) == []
+
+
+def test_absolutize_urls_touches_only_relative_ur_lines():
+    from airiti_mcp.cite_export import absolutize_urls
+
+    base = "https://www.airitilibrary.com"
+    ris = (
+        "TY  - JOUR" + CRLF + "UR  - Article/Detail?docID=P1-2" + CRLF + "ER  - " + CRLF + CRLF
+        + "TY  - JOUR" + CRLF + "UR  - https://doi.org/10.1/x" + CRLF + "AB  - see Article/Detail?docID=Z in the text" + CRLF + "ER  - " + CRLF
+    )
+    out = absolutize_urls(ris, base)
+    assert "UR  - https://www.airitilibrary.com/Article/Detail?docID=P1-2" + CRLF in out
+    assert "UR  - https://doi.org/10.1/x" in out and "AB  - see Article/Detail?docID=Z in the text" in out
+    assert out.count("ER  - " + CRLF) == 2 and out.count(CRLF) == ris.count(CRLF)  # nothing else moved
+    assert absolutize_urls(out, base) == out  # idempotent
+    for other in ("@article{a,\r\nDOI ={10.1/x},\r\n}", "%0 Journal Article" + CRLF + "%T t" + CRLF):
+        assert absolutize_urls(other, base) == other  # BibTeX / EndNote are never changed
+
+
+async def test_export_path_completes_relative_urls_end_to_end(fake_site, monkeypatch):
+    state, root = fake_site
+
+    async def no_doi_site(ids, site_type):
+        content = "".join("TY  - JOUR" + CRLF + "T1  - " + i + CRLF + "UR  - Article/Detail?docID=" + i + CRLF + "ER  - " + CRLF + CRLF for i in ids)
+        return json.dumps({"ReturnValue": 0, "ReturnData": {"ID": "x", "Content": content}})
+
+    monkeypatch.setattr(server.client, "fetch_cite_export", no_doi_site)
+    out = await server.airiti_export_citation(["DOC1"], "ris")
+    assert "UR  - https://www.airitilibrary.com/Article/Detail?docID=DOC1" in out
+    await server.airiti_search_all("x", export_format="ris")
+    d = [p for p in root.iterdir() if p.is_dir()][0]
+    merged = (d / "export.ris").read_bytes().decode("utf-8")
+    assert merged.count("UR  - https://www.airitilibrary.com/Article/") == 40 and "UR  - Article/" not in merged
+    assert "已補成完整網址" in (d / "search_log.txt").read_text(encoding="utf-8")

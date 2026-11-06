@@ -58,7 +58,7 @@ async def export_ids(ids: list[str], site_type: str, attempts: int = 2) -> tuple
         body = await client.fetch_cite_export(ids, site_type)
         content = cite_export.parse_cite_export(body)
         if content:
-            return content, ""
+            return cite_export.absolutize_urls(content, client.BASE), ""
         site_msg = cite_export.cite_export_error(body)
     return None, site_msg
 
@@ -324,6 +324,8 @@ def export_lines(st: RunState) -> list[str]:
         f"書目匯出：{desc}，成功 {len(st.done)} 篇 → {name if st.done else '（未產生檔案）'}",
         f"  略過學位論文 {st.skipped_theses} 篇（無法匯出）",
     ]
+    if st.export_key == "ris":
+        lines.append("  備註：沒有 DOI 的記錄，華藝給的 UR 是相對路徑，已補成完整網址；其餘內容原樣。")
     if st.failed:
         shown = "、".join(st.failed[:20]) + (f"…（另 {len(st.failed) - 20} 篇）" if len(st.failed) > 20 else "")
         lines.append(f"  【匯出失敗】{len(st.failed)} 篇（華藝拒絕這些 DocID）：{shown}")

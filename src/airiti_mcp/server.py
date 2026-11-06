@@ -187,13 +187,16 @@ MAX_EXPORT = harvest.MAX_EXPORT
 
 
 @_tool
-async def airiti_export_citation(doc_ids: list[str] | str, format: str = "bibtex") -> str:
+async def airiti_export_citation(doc_ids: list[str] | str, format: str = "bibtex", save: bool = False) -> str:
     """取得華藝官方匯出的書目檔內容（一次可多篇，合成一個檔），可存檔匯入 Zotero、Mendeley、EndNote 等。
 
     Args:
         doc_ids: 華藝 DocID 清單，最多 20 個（由 airiti_search 取得）；只匯出一篇時也可直接傳一個字串。
         format: bibtex（預設）、ris、endnote 其中之一。
-    內容原樣來自華藝（含中英文關鍵字、摘要、DOI），本工具不修改；請把「```」之間的文字存成對應副檔名。
+        save: 預設 False＝把全文放進回傳內容（20 篇約 3–4 萬字元，會佔用大量對話上下文）。
+            True＝改成直接存成檔案（存到匯出資料夾下新的子資料夾），只回傳檔案路徑與篇數，不把內容放進對話。
+    內容來自華藝（含中英文關鍵字、摘要、DOI），本工具只做一項修改：RIS 裡沒有 DOI 的記錄，華藝給的 UR 是相對路徑
+    （Article/Detail?docID=…，匯入後連結會壞），這裡補成完整網址；其餘原樣。請把「```」之間的文字存成對應副檔名。
     注意：只要清單裡有一個 DocID 無效，華藝會整批失敗且不指出是哪一個。
     """
     key = (format or "").strip().lower()
@@ -212,6 +215,12 @@ async def airiti_export_citation(doc_ids: list[str] | str, format: str = "bibtex
     if not content:
         hint = "請確認每個 DocID 都正確；U 開頭多半是學位論文，華藝已分到 airitietds.com。批次失敗時可改單篇匯出找出無效的 DocID。"
         raise AiritiError(f"華藝沒有回傳 {desc} 內容（重試一次仍失敗）。站方訊息：{site_msg or '（無）'}。{hint}")
+    if save:
+        folder = search_export.make_export_folder(f"export_{len(ids)}", datetime.now().astimezone())
+        path = folder / f"export.{ext}"
+        with path.open("w", encoding="utf-8", newline="") as f:
+            f.write(content + "\r\n")
+        return f"{desc}，共 {len(ids)} 篇，已存檔（內容沒有放進對話）：{path}"
     name = ids[0] if len(ids) == 1 else f"airiti_export_{len(ids)}篇"
     return f"{desc}，共 {len(ids)} 篇，建議存成 {name}.{ext}：\n```\n{content}\n```"
 
