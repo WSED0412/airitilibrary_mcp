@@ -7,6 +7,7 @@
 | `airiti_search(query, page=1, max_results=10)` | 搜尋（所有欄位）。回傳總筆數＋本頁每筆的篇名、作者、出處、DocID、詳目頁網址。`max_results` 1–20；每次只抓一頁。 |
 | `airiti_abstract(doc_id, include_references=False, include_cited_by=False)` | 完整書目（含 DOI、英文篇名、語言、OpenAccess、可全文下載標記）、中文摘要、英文並列摘要、中英關鍵字。選填：`include_references` 附參考文獻、`include_cited_by` 附華藝收錄的被引用記錄（兩者預設關閉，清單可能很長；有 DocID 的可再丟給本工具）。 |
 | `airiti_cite_apa(doc_id)` | 以書目資料產生 APA 7 引用（目前只支援期刊論文；學位論文會明確拒絕）。 |
+| `airiti_export_citation(doc_id, format="bibtex")` | 回傳華藝官方匯出的書目檔內容，`format` 為 `bibtex`／`ris`／`endnote`，可存檔後匯入 Zotero、Mendeley、EndNote 等。內容原樣來自華藝，不修改；每次多 2 個請求（引用視窗＋匯出）。 |
 
 ## 行為與限制
 
@@ -78,6 +79,7 @@ src/airiti_mcp/
   client.py   # HTTP、限速、逾時、查詢 JSON 組裝
   parsers.py  # 搜尋頁／詳目頁解析
   cite.py     # APA 7
+  cite_export.py  # 華藝官方書目匯出（BibTeX／RIS／EndNote）的解析
   errors.py
 ```
 

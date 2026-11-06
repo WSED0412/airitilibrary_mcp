@@ -32,12 +32,12 @@ def apa7(d: Detail) -> str:
         pages = ""
         if d.first_page:
             pages = f"，{d.first_page}–{d.last_page}" if d.last_page else f"，{d.first_page}"
-        body = f"{d.title}。*{d.journal}*" + (f"，{vol}{iss}" if vol else "") + pages + "。"
+        body = f"{d.title}。*{d.journal}*" + (f"，{vol}{iss}" if (vol or iss) else "") + pages + "。"
     else:
         authors = ", ".join(d.authors)
         head = f"{authors} ({year}). "
         vol = f", *{d.volume}*" if d.volume else ""
-        iss = f"({d.issue})" if d.issue else ""
+        iss = (f"({d.issue})" if d.volume else f", ({d.issue})") if d.issue else ""
         pages = f", {d.first_page}–{d.last_page}" if d.first_page and d.last_page else (f", {d.first_page}" if d.first_page else "")
         body = f"{d.title}. *{d.journal}*{vol}{iss}{pages}."
     link = f"https://doi.org/{d.doi}" if d.doi else d.url

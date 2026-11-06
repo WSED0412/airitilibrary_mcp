@@ -9,7 +9,7 @@ import re
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from . import client, hints, parsers
+from . import cite_export, client, hints, parsers
 from .cite import apa7
 from .errors import AiritiError, AiritiParseError
 
@@ -180,3 +180,29 @@ async def airiti_cite_apa(doc_id: str) -> str:
         doc_id: 華藝 DocID。
     """
     return apa7(await _detail(doc_id))
+
+
+@_tool
+async def airiti_export_citation(doc_id: str, format: str = "bibtex") -> str:
+    """取得華藝官方匯出的書目檔內容，可存成檔案匯入 Zotero、Mendeley、EndNote 等書目管理軟體。
+
+    Args:
+        doc_id: 華藝 DocID。
+        format: bibtex（預設）、ris、endnote 其中之一。
+    內容原樣來自華藝（含中英文關鍵字、摘要、DOI），本工具不修改；請把「```」之間的文字存成對應副檔名。
+    """
+    key = (format or "").strip().lower()
+    if key not in cite_export.FORMATS:
+        raise AiritiError(f"不支援的 format「{format}」。可用：{'、'.join(cite_export.FORMATS)}。")
+    doc_id = _check_doc_id(doc_id)
+    site_type, ext, desc = cite_export.FORMATS[key]
+
+    content = None
+    for _ in range(2):  # the site was seen failing once with an empty result, then succeeding
+        content = cite_export.parse_cite_export(await client.fetch_cite_export(doc_id, site_type))
+        if content:
+            break
+    if not content:
+        hint = "U 開頭多半是學位論文，華藝已分到 airitietds.com。" if re.match(r"U\d", doc_id) else "請確認 DocID 是否正確。"
+        raise AiritiError(f"華藝沒有回傳 {desc} 內容（重試一次仍失敗）。{hint}")
+    return f"{desc}，建議存成 {doc_id}.{ext}：\n```\n{content}\n```"

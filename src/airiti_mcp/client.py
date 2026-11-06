@@ -1,8 +1,9 @@
 """HTTP layer: one place for rate limiting, timeout, headers and error mapping.
 
 No caching of any kind (pages are marked noarchive) -- every call hits the site.
-Only the article-search and article-detail pages are ever requested; nothing
-related to full-text download is touched.
+Only the article-search page, the article-detail page and the citation-export endpoints
+(CiteWindow / CiteExport, used only by airiti_export_citation) are ever requested;
+nothing related to full-text download is touched.
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from urllib.parse import quote
 
 import httpx
 
+from .cite_export import parse_cite_token
 from .errors import AiritiNetworkError
 
 BASE = "https://www.airitilibrary.com"
@@ -28,14 +30,14 @@ _lock = asyncio.Lock()
 _last_request_at = 0.0
 
 
-async def _throttled(client: httpx.AsyncClient, method: str, url: str) -> httpx.Response:
+async def _throttled(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
     global _last_request_at
     async with _lock:  # serialises requests so the interval holds under concurrency
         wait = MIN_INTERVAL - (time.monotonic() - _last_request_at)
         if wait > 0:
             await asyncio.sleep(wait)
         try:
-            resp = await client.request(method, url)
+            resp = await client.request(method, url, **kwargs)
         except httpx.TimeoutException as e:
             raise AiritiNetworkError(f"連線華藝逾時（{TIMEOUT:.0f} 秒）：{url}") from e
         except httpx.HTTPError as e:
@@ -79,6 +81,20 @@ async def fetch_search_html(query: str, page: int, page_size: int) -> str:
     url = f"{BASE}/Article/Query?queryString={build_query_string(query, page, page_size)}"
     async with httpx.AsyncClient(headers=HEADERS, timeout=TIMEOUT, follow_redirects=True) as c:
         return (await _throttled(c, "POST", url)).text
+
+
+async def fetch_cite_export(doc_id: str, site_type: str) -> str:
+    """Airiti's own export (BibTeX/RIS/Endnote). Two requests: the cite window (gives the
+    anti-forgery token and sets its cookie), then the export. Returns the raw JSON body."""
+    js = quote(json.dumps([doc_id], ensure_ascii=False, separators=(",", ":")), safe="")
+    async with httpx.AsyncClient(headers=HEADERS, timeout=TIMEOUT, follow_redirects=True) as c:
+        window = await _throttled(c, "POST", f"{BASE}/Article/CiteWindow", data={"jsString": js})
+        token = parse_cite_token(window.text)
+        resp = await _throttled(
+            c, "POST", f"{BASE}/Article/CiteExport",
+            data={"jsString": js, "type": site_type}, headers={"AjaxRequestVerificationToken": token},
+        )
+        return resp.text
 
 
 async def fetch_detail_html(doc_id: str) -> str:

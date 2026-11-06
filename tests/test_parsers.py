@@ -100,6 +100,28 @@ def test_apa_chinese():
     assert apa7(parse_detail(DETAIL, "ID")) == "蔡欣倫、王小明（2024）。題目。*期刊名*，*1*（3），19–57。https://doi.org/10.1/x(3).2"
 
 
+def test_apa_issue_without_volume():
+    d = parse_detail(DETAIL, "ID")
+    d.volume = ""
+    assert "，（3），19–57。" in apa7(d)
+    d.authors = ["Smith, J."]
+    assert "*期刊名*, (3), 19–57." in apa7(d)
+
+
+def test_cite_export_parsing():
+    from airiti_mcp.cite_export import parse_cite_export, parse_cite_token
+
+    assert parse_cite_token("var ajaxRequestVerificationToken_CiteWindow = 'abc:def';") == "abc:def"
+    with pytest.raises(AiritiParseError):
+        parse_cite_token("<html></html>")
+    ok = '{"ReturnValue":0,"ReturnData":{"ID":"x.bib","Content":"@article{a,}\\r\\n\\r\\n"}}'
+    assert parse_cite_export(ok) == "@article{a,}"
+    # site-reported failure / empty data -> None (caller retries), not an exception
+    assert parse_cite_export('{"ReturnValue":1,"ReturnData":null}') is None
+    with pytest.raises(AiritiParseError):
+        parse_cite_export("<html>not json</html>")
+
+
 def test_apa_refuses_thesis():
     d = parse_detail(DETAIL.replace("期刊名", "某大學資訊系學位論文"), "ID")
     with pytest.raises(AiritiError):
