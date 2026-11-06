@@ -8,7 +8,7 @@ import pytest
 from airiti_mcp import harvest, server
 from mcp.server.mcpserver.exceptions import ToolError
 
-from airiti_mcp.errors import AiritiNetworkError
+from airiti_mcp.errors import AiritiError, AiritiNetworkError
 from airiti_mcp.parsers import SearchItem, SearchPage
 from airiti_mcp.search_export import build_csv, build_log, duplicate_groups, is_preprint, run_folder_name
 
@@ -96,14 +96,19 @@ async def test_search_all_truncates_at_max_total(fake_site):
     assert "移除 0 筆，剩 40 筆" in log and "超過上限而未納入：15 筆" in log and "納入清單（results.csv）：25 筆" in log
 
 
-async def test_search_all_keeps_partial_results_on_failure(fake_site):
+async def test_persistent_failure_pauses_twice_then_gives_up_keeping_partial_results(fake_site):
     state, root = fake_site
     state["fail_page"] = 2
-    out = await server.airiti_search_all("x")
+    first = await server.airiti_search_all("x")
     d = _only_run_dir(root)
-    rows = _rows(d)
-    assert len(rows) == 1 + 20
-    assert "【不完整】" in (d / "search_log.txt").read_text(encoding="utf-8") and "【不完整】" in out
+    assert "因錯誤暫停" in first and "連續第 1/3 次" in first and (d / "state.json").exists()
+    assert not (d / "search_log.txt").exists()
+    second = await server.airiti_search_all(resume=d.name)
+    assert "連續第 2/3 次" in second
+    third = await server.airiti_search_all(resume=d.name)  # third strike: give up, keep what we have
+    log = (d / "search_log.txt").read_text(encoding="utf-8")
+    assert "【不完整】" in third and "連續失敗 3 次後放棄" in log and len(_rows(d)) == 1 + 20
+    assert state["pages"] == [1, 2, 2, 2]  # the same page was retried, not skipped
 
 
 async def test_search_all_dedupes_repeated_doc_ids(fake_site):
@@ -187,22 +192,49 @@ async def test_search_all_rejects_bad_export_format_before_any_request(fake_site
     assert list(root.iterdir()) == []
 
 
-async def test_midrun_network_failure_separates_unattempted_from_failed(fake_site, monkeypatch):
+async def test_export_gives_up_after_three_failures_and_separates_unattempted_from_failed(fake_site, monkeypatch):
     state, root = fake_site
     calls = []
 
-    async def flaky(ids, site_type):
+    async def down(ids, site_type):
         calls.append(len(ids))
-        if len(calls) == 2:  # second batch: network error
+        if len(calls) >= 2:  # first batch fine, then the network stays down
             raise AiritiNetworkError("boom")
         return json.dumps({"ReturnValue": 0, "ReturnData": {"ID": "x", "Content": "TY  - JOUR" + CRLF + "ER  - " + CRLF}})
 
-    monkeypatch.setattr(server.client, "fetch_cite_export", flaky)
-    out = await server.airiti_search_all("x", export_format="ris")
-    log = (_only_run_dir(root) / "search_log.txt").read_text(encoding="utf-8")
-    assert "匯出中斷" in log and "因中斷未處理】20 篇" in log
+    monkeypatch.setattr(server.client, "fetch_cite_export", down)
+    first = await server.airiti_search_all("x", export_format="ris")
+    d = _only_run_dir(root)
+    assert "因錯誤暫停" in first and not (d / "search_log.txt").exists()
+    await server.airiti_search_all(resume=d.name)
+    out = await server.airiti_search_all(resume=d.name)
+    log = (d / "search_log.txt").read_text(encoding="utf-8")
+    assert "匯出中斷】連續失敗 3 次後放棄" in log and "因中斷未處理】20 篇" in log
     assert "匯出失敗" not in log and "DOC22" not in log  # untried ids are not listed as invalid
     assert "成功 20 篇" in log and "因中斷未處理" in out
+
+
+async def test_transient_export_error_is_retried_on_resume_without_duplicates(fake_site, monkeypatch):
+    state, root = fake_site
+    calls = []
+    orig = server.client.fetch_cite_export
+
+    async def hiccup(ids, site_type):
+        calls.append(list(ids))
+        if len(calls) == 2:  # only the second batch call fails, once
+            raise AiritiNetworkError("blip")
+        return await orig(ids, site_type)
+
+    monkeypatch.setattr(server.client, "fetch_cite_export", hiccup)
+    first = await server.airiti_search_all("x", export_format="ris")
+    d = _only_run_dir(root)
+    assert "因錯誤暫停" in first
+    second = await server.airiti_search_all(resume=d.name)
+    assert "因錯誤暫停" not in second and "已暫停" not in second
+    titles = [l for l in (d / "export.ris").read_bytes().decode("utf-8").split(CRLF) if l.startswith("T1  - ")]
+    assert len(titles) == 40 == len(set(titles))
+    log = (d / "search_log.txt").read_text(encoding="utf-8")
+    assert "成功 40 篇" in log and "因中斷未處理" not in log and "匯出中斷" not in log
 
 
 async def test_isolating_a_bad_id_costs_few_requests(fake_site):
@@ -260,23 +292,24 @@ def _run_dirs(root):
 
 async def test_pauses_in_harvest_then_resumes_without_refetching(fake_site):
     state, root = fake_site
-    state["step"] = 50.0  # every page "takes" 50 s; budget is 10 s
+    state["step"] = 50.0  # every page "takes" 50 s; budget is 10 s. Page 1 is fetched before the run exists
     first = await server.airiti_search_all("x", time_budget_s=10)
     d = _only_run_dir(root)
-    assert "已暫停" in first and f'resume="{d.name}"' in first and "抓取結果頁 2/3" in first
+    assert "已暫停" in first and f'resume="{d.name}"' in first and "抓取結果頁 1/3" in first  # page 1 used the budget
     assert (d / "state.json").exists() and (d / "results.csv").exists()
     assert not (d / "search_log.txt").exists()  # the log is written when the run is complete
-    assert len(_rows(d)) == 1 + 40  # provisional list so far
+    assert len(_rows(d)) == 1 + 20  # provisional list so far
 
     second = await server.airiti_search_all(resume=d.name, time_budget_s=10)
-    assert "已暫停" not in second and "共 45 筆" in second
+    assert "已暫停" in second and "抓取結果頁 2/3" in second
+    third = await server.airiti_search_all(resume=d.name, time_budget_s=10)
+    assert "已暫停" not in third and "共 45 筆" in third
     assert state["pages"] == [1, 2, 3]  # nothing fetched twice
     assert len(_rows(d)) == 1 + 45
-    log = (d / "search_log.txt").read_text(encoding="utf-8")
-    assert "分 2 次呼叫完成" in log
+    assert "分 3 次呼叫完成" in (d / "search_log.txt").read_text(encoding="utf-8")
 
-    third = await server.airiti_search_all(resume=d.name)  # finished run: just shows the result again
-    assert "共 45 筆" in third and state["pages"] == [1, 2, 3]
+    again = await server.airiti_search_all(resume=d.name)  # finished run: just shows the result again
+    assert "共 45 筆" in again and state["pages"] == [1, 2, 3]
 
 
 async def test_pauses_in_export_then_resumes_without_duplicates(fake_site):
@@ -395,3 +428,148 @@ async def test_search_all_summary_mentions_suspected_duplicates(fake_site, monke
     d = _only_run_dir(root)
     assert len(_rows(d)) == 1 + 2  # both rows kept
     assert _rows(d)[1][-1] == "D1" and _rows(d)[2][-2:] == ["Y", "D1"]
+
+
+async def test_first_page_time_counts_against_the_budget(fake_site):
+    state, root = fake_site
+    state["step"] = 60.0
+    out = await server.airiti_search_all("x", time_budget_s=100)
+    # page 1 took 60 s, leaving 40 s: page 2 starts (60 < 100) and ends at 120, page 3 must wait
+    assert "已暫停" in out and "抓取結果頁 2/3" in out and state["pages"] == [1, 2]
+
+
+async def test_isolating_a_bad_id_respects_the_time_budget(fake_site):
+    state, root = fake_site
+    state["bad_id"] = "DOC7"
+    state["export_step"] = 3.0
+    first = await server.airiti_search_all("x", export_format="ris", time_budget_s=10)
+    d = _only_run_dir(root)
+    assert "已暫停" in first
+    assert len(state["export_calls"]) <= 6  # not the ~22 calls (66 s) the old nested loop made in one go
+    for _ in range(40):
+        if "已暫停" not in await server.airiti_search_all(resume=d.name, time_budget_s=10):
+            break
+    assert len(state["export_calls"]) == 2 + 20 + 1  # pausing costs no extra requests
+    text = (d / "export.ris").read_bytes().decode("utf-8")
+    titles = [l for l in text.split(CRLF) if l.startswith("T1  - ")]
+    assert len(titles) == 39 == len(set(titles)) and "T1  - DOC7" + CRLF not in text
+    log = (d / "search_log.txt").read_text(encoding="utf-8")
+    assert "成功 39 篇" in log and "匯出失敗】1 篇" in log and "DOC7" in log
+
+
+async def test_abandoned_run_never_reports_progress_complete(fake_site, tmp_path):
+    state, root = fake_site
+    st, _ = await harvest.start_run("x", 1000, "")
+    folder = tmp_path / "r"
+    folder.mkdir()
+    state["fail_page"] = 2
+    seen = []
+
+    async def prog(done, total, message):
+        seen.append((done, total, message))
+
+    for _ in range(3):
+        finished = await harvest.advance(st, folder, 90, prog)
+    assert finished and st.gave_up
+    assert not any(m == "完成" for _, _, m in seen)
+
+
+async def test_concurrent_resume_of_one_run_is_refused_not_duplicated(fake_site, monkeypatch):
+    import asyncio
+
+    state, root = fake_site
+    state["export_step"] = 50.0
+    await server.airiti_search_all("x", export_format="ris", time_budget_s=10)
+    d = _only_run_dir(root)
+    state["export_step"] = 0.0
+    orig = server.client.fetch_cite_export
+
+    async def yielding(ids, site_type):
+        await asyncio.sleep(0.01)  # a real network call suspends the coroutine, letting the other call in
+        return await orig(ids, site_type)
+
+    monkeypatch.setattr(server.client, "fetch_cite_export", yielding)
+    outs = await asyncio.gather(server.airiti_search_all(resume=d.name), server.airiti_search_all(resume=d.name))
+    assert sum("正在另一個呼叫裡執行" in o for o in outs) == 1
+    titles = [l for l in (d / "export.ris").read_bytes().decode("utf-8").split(CRLF) if l.startswith("T1  - ")]
+    assert len(titles) == 40 == len(set(titles))
+
+
+def test_resume_refuses_a_link_that_points_outside_the_export_folder(tmp_path, monkeypatch):
+    import os
+    import subprocess
+    import sys
+
+    root = tmp_path / "exports"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "state.json").write_text("{}", encoding="utf-8")
+    link = root / "20260101_000000_victim"
+    try:
+        if sys.platform == "win32":  # a junction needs no admin rights
+            r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)], capture_output=True)
+            assert r.returncode == 0
+        else:
+            os.symlink(outside, link, target_is_directory=True)
+    except (OSError, AssertionError):
+        pytest.skip("cannot create a directory link here")
+    monkeypatch.setenv("AIRITI_EXPORT_DIR", str(root))
+    with pytest.raises(AiritiError, match="不在匯出資料夾"):
+        harvest.resolve_run_folder(link.name)
+
+
+def test_duplicate_groups_ignores_records_without_authors_and_folds_full_width():
+    # editorials in different journals: same title, no author -> not one paper
+    assert duplicate_groups([_it("1", "編者的話", [], "A期刊 2010"), _it("2", "編者的話", [], "B期刊 2024")]) == {}
+    # full-width vs ASCII letters/digits are the same title
+    g = duplicate_groups([_it("1", "5G通訊技術之應用", ["甲"]), _it("2", "５Ｇ通訊技術之應用", ["甲"], "預刊文章")])
+    assert g == {"1": "D1", "2": "D1"}
+
+
+async def test_resume_drops_a_batch_that_was_written_but_never_saved(fake_site):
+    state, root = fake_site
+    state["export_step"] = 50.0
+    await server.airiti_search_all("x", export_format="ris", time_budget_s=10)  # batch 1 written and saved
+    d = _only_run_dir(root)
+    path = d / "export.ris"
+    saved = path.read_bytes()
+    # simulate a hard kill between "append batch 2" and "save state": batch 2 is on disk, state does not know
+    path.write_bytes(saved + saved)
+    state["export_step"] = 0.0
+    await server.airiti_search_all(resume=d.name, time_budget_s=10)
+    titles = [l for l in path.read_bytes().decode("utf-8").split(CRLF) if l.startswith("T1  - ")]
+    assert len(titles) == 40 == len(set(titles))  # every id exactly once; the unsaved copy was dropped
+
+
+async def test_old_state_without_export_bytes_is_never_truncated(fake_site):
+    state, root = fake_site
+    state["export_step"] = 50.0
+    await server.airiti_search_all("x", export_format="ris", time_budget_s=10)
+    d = _only_run_dir(root)
+    # a state file written before export_bytes / version existed
+    data = json.loads((d / "state.json").read_text(encoding="utf-8"))
+    del data["export_bytes"], data["version"]
+    (d / "state.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    before = (d / "export.ris").read_bytes()
+    state["export_step"] = 0.0
+    await server.airiti_search_all(resume=d.name, time_budget_s=10)
+    after = (d / "export.ris").read_bytes()
+    assert after.startswith(before) and after.decode("utf-8").count("TY  - JOUR") == 40  # nothing was wiped
+
+
+def test_state_file_version_is_checked(tmp_path):
+    folder = tmp_path / "run"
+    folder.mkdir()
+    base = {"query": "q", "max_total": 10, "export_key": "", "started": "2026-01-01T00:00:00+08:00"}
+    (folder / "state.json").write_text(json.dumps({**base, "version": 99}), encoding="utf-8")
+    with pytest.raises(AiritiError, match="版本 99"):
+        harvest.load_state(folder)
+    (folder / "state.json").write_text(json.dumps(base), encoding="utf-8")  # no version = old file = version 1
+    assert harvest.load_state(folder).version == 1
+    (folder / "state.json").write_text(json.dumps({**base, "no_such_field": 1}), encoding="utf-8")
+    with pytest.raises(AiritiError, match="讀不到"):
+        harvest.load_state(folder)
+    (folder / "state.json").write_text("[1, 2]", encoding="utf-8")
+    with pytest.raises(AiritiError, match="讀不到"):
+        harvest.load_state(folder)

@@ -4,9 +4,14 @@ A run walks through: fetch every result page -> (optionally) export bibliography
 Every step saves `state.json` in the run folder, and the engine stops cleanly at a deadline, so a
 call never has to outlive an MCP client's timeout: the caller just calls again with `resume=<folder>`.
 
+A transient error (network, site hiccup) pauses the run instead of ending it; `resume` retries the same
+step. After MAX_ERROR_STREAK consecutive failures the engine gives up, keeps what it has and marks the run
+incomplete.
+
 The state is plain JSON; nothing here touches the network except through `client`."""
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -20,12 +25,25 @@ from .errors import AiritiError
 
 PAGE_SIZE = 20
 MAX_EXPORT = 20  # tested live with 13 at once; kept modest so one batch stays fast
+MAX_ERROR_STREAK = 3  # consecutive failed attempts at the same step before the run gives up
 STATE_FILE = "state.json"
+STATE_VERSION = 1  # bump when a field is removed or renamed (new fields with defaults need no bump)
 _CRLF2 = "\r\n\r\n"
 
 _now = time.monotonic  # tests replace this with a fake clock
+_locks: dict[str, asyncio.Lock] = {}
 
 ProgressFn = Callable[[float, float | None, str], Awaitable[None]]
+
+
+def now() -> float:
+    return _now()
+
+
+def run_lock(name: str) -> asyncio.Lock:
+    """One lock per run folder: two calls must never advance the same run at the same time
+    (they would both export the same batch). In-process only; a second MCP server process is not covered."""
+    return _locks.setdefault(name, asyncio.Lock())
 
 
 async def _no_progress(progress: float, total: float | None, message: str) -> None:
@@ -63,19 +81,24 @@ class RunState:
     fetched: int = 0  # rows received, duplicates included
     items: list[dict] = field(default_factory=list)  # raw rows while harvesting; unique, capped rows afterwards
     deduped: int = 0  # unique DocIDs before the cap
-    harvest_error: str = ""
+    harvest_error: str = ""  # set only when the run gave up on harvesting
     harvest_done: bool = False
     ids: list[str] = field(default_factory=list)  # exportable (non-thesis) DocIDs, in order
     skipped_theses: int = 0
     export_cursor: int = 0
+    isolate_until: int = 0  # ids[export_cursor:isolate_until] are exported one by one (a batch failed as a whole)
     done: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     unattempted: list[str] = field(default_factory=list)
-    export_problem: str = ""
+    export_problem: str = ""  # set only when the run gave up on exporting
     export_done: bool = False
+    error_streak: int = 0  # consecutive failures at the current step; 0 = healthy
+    last_error: str = ""
     calls: int = 0
     elapsed_s: float = 0.0
     finished: bool = False
+    export_bytes: int = -1  # size of the export file after the last saved batch; -1 = unknown (older state files)
+    version: int = STATE_VERSION
 
     def search_items(self) -> list[parsers.SearchItem]:
         return [parsers.SearchItem(**d) for d in self.items]
@@ -86,6 +109,10 @@ class RunState:
         out = [d for d in self.items if not (d["doc_id"] in seen or seen.add(d["doc_id"]))]
         return out[: self.max_total]
 
+    @property
+    def gave_up(self) -> bool:
+        return bool(self.harvest_error or self.export_problem)
+
 
 def save_state(st: RunState, folder: Path) -> None:
     tmp = folder / (STATE_FILE + ".tmp")
@@ -95,20 +122,28 @@ def save_state(st: RunState, folder: Path) -> None:
 
 def load_state(folder: Path) -> RunState:
     try:
-        return RunState(**json.loads((folder / STATE_FILE).read_text(encoding="utf-8")))
+        data = json.loads((folder / STATE_FILE).read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("進度檔不是 JSON 物件")
+        if data.get("version", 1) > STATE_VERSION:
+            raise ValueError(f"進度檔版本 {data['version']} 比這個程式支援的 {STATE_VERSION} 新，請更新 airiti-mcp 後再續跑")
+        return RunState(**data)
     except (OSError, ValueError, TypeError) as e:
         raise AiritiError(f"讀不到這次檢索的進度檔（{folder.name}/{STATE_FILE}）：{e}") from e
 
 
 def resolve_run_folder(resume: str) -> Path:
-    """`resume` is a run-folder NAME under the export root, never a path."""
+    """`resume` is a run-folder NAME under the export root, never a path. The folder must be a direct
+    child of the export root once links are resolved (a symlink / junction pointing elsewhere is refused)."""
     name = resume.strip()
     root = search_export.export_root()
-    folder = root / name
     if not name or name in {".", ".."} or "/" in name or "\\" in name or ":" in name:
         raise AiritiError("resume 必須是上次回傳的資料夾名稱（不是路徑）。")
+    folder = root / name
     if not (folder / STATE_FILE).is_file():
         raise AiritiError(f"找不到可續跑的檢索「{name}」（在 {root} 底下沒有 {STATE_FILE}）。")
+    if folder.resolve().parent != root.resolve():
+        raise AiritiError(f"「{name}」不在匯出資料夾裡（可能是連結到別處的捷徑），拒絕續跑。")
     return folder
 
 
@@ -133,6 +168,18 @@ def _units_total(st: RunState) -> float:
     return st.pages_needed * (2 if st.export_key else 1)
 
 
+def _record_error(st: RunState, where: str, e: AiritiError) -> bool:
+    """Note a failed attempt. Returns True when the run should give up (too many in a row)."""
+    st.error_streak += 1
+    st.last_error = f"{where}：{type(e).__name__}: {e}"
+    return st.error_streak >= MAX_ERROR_STREAK
+
+
+def _healthy(st: RunState) -> None:
+    st.error_streak = 0
+    st.last_error = ""
+
+
 async def _harvest(st: RunState, folder: Path, deadline: float, progress: ProgressFn) -> None:
     while st.next_page <= st.pages_needed:
         if _now() >= deadline:
@@ -140,19 +187,23 @@ async def _harvest(st: RunState, folder: Path, deadline: float, progress: Progre
         page = st.next_page
         try:
             res = parsers.parse_search(await client.fetch_search_html(st.query, page, PAGE_SIZE))
-        except AiritiError as e:  # keep what we have; the log says the run is incomplete
-            st.harvest_error = f"第 {page} 頁：{type(e).__name__}: {e}"
+        except AiritiError as e:
+            if not _record_error(st, f"第 {page} 頁", e):
+                save_state(st, folder)
+                return  # paused for a retry on the next call
+            st.harvest_error = st.last_error  # gave up: keep what we have; the log says the run is incomplete
             break
-        if not res.items:
+        if not res.items:  # not a transient condition: stop here
             st.harvest_error = f"第 {page} 頁沒有項目（華藝回報 {res.total} 筆），提前停止。"
             break
+        _healthy(st)
         st.pages_fetched += 1
         st.fetched += len(res.items)
         st.items += [asdict(i) for i in res.items]
         st.next_page += 1
         save_state(st, folder)
         await progress(st.pages_fetched, _units_total(st), f"已抓 {st.pages_fetched}/{st.pages_needed} 頁")
-    # harvest over (all pages, or stopped early on an error): de-duplicate and apply the cap
+    # harvest over (all pages, or gave up): de-duplicate and apply the cap
     seen: set[str] = set()
     deduped = [d for d in st.items if not (d["doc_id"] in seen or seen.add(d["doc_id"]))]
     st.deduped = len(deduped)
@@ -161,51 +212,52 @@ async def _harvest(st: RunState, folder: Path, deadline: float, progress: Progre
     st.ids = [it.doc_id for it in items if not is_thesis(it)]
     st.skipped_theses = len(items) - len(st.ids)
     st.harvest_done = True
+    st.export_bytes = 0  # the export file starts empty from here
     if not st.export_key or not st.ids:
         st.export_done = True
     save_state(st, folder)
 
 
 async def _export(st: RunState, folder: Path, deadline: float, progress: ProgressFn) -> None:
+    """One unit = one batch of up to MAX_EXPORT ids, or a single id while isolating a bad one. The deadline is
+    checked between units, so even isolating a batch with an invalid DocID can pause and resume."""
     site_type, ext, _ = cite_export.FORMATS[st.export_key]
     path = folder / f"export.{ext}"
+    if st.export_bytes >= 0 and path.exists() and path.stat().st_size > st.export_bytes:
+        # an earlier call wrote a batch but died before saving state (killed, power loss): drop the unsaved
+        # tail so that batch is exported again exactly once. -1 (older state files) never truncates.
+        with path.open("r+b") as f:
+            f.truncate(st.export_bytes)
     while st.export_cursor < len(st.ids):
         if _now() >= deadline:
             return  # paused
         cursor = st.export_cursor
-        batch = st.ids[cursor : cursor + MAX_EXPORT]
-        parts: list[str] = []
-        ok: list[str] = []
-        bad: list[str] = []
-        stop: AiritiError | None = None
+        single = cursor < st.isolate_until
+        batch = st.ids[cursor : cursor + (1 if single else MAX_EXPORT)]
         try:
-            content, _ = await export_ids(batch, site_type)
-            if content:
-                parts, ok = [content], list(batch)
-            elif len(batch) == 1:  # already tried twice; nothing left to isolate
-                bad = list(batch)
-            else:
-                for one in batch:  # one invalid DocID fails the whole batch: retry singly (once) to isolate it
-                    c, _ = await export_ids([one], site_type, attempts=1)
-                    if c:
-                        parts.append(c)
-                        ok.append(one)
-                    else:
-                        bad.append(one)
-        except AiritiError as e:  # network/parse trouble: stop, keep what was exported
-            stop = e
-        if parts:
-            with path.open("a", encoding="utf-8", newline="") as f:
-                f.write(_CRLF2.join(parts) + _CRLF2)
-        st.done += ok
-        st.failed += bad
-        if stop is not None:
+            content, _ = await export_ids(batch, site_type, attempts=1 if single else 2)
+        except AiritiError as e:  # network/parse trouble
+            if not _record_error(st, "匯出", e):
+                save_state(st, folder)
+                return  # paused for a retry on the next call
             handled = set(st.done) | set(st.failed)
             st.unattempted = [i for i in st.ids[cursor:] if i not in handled]
-            st.export_problem = f"{type(stop).__name__}: {stop}"
+            st.export_problem = st.last_error
             st.export_done = True
             save_state(st, folder)
             return
+        _healthy(st)
+        if content:
+            with path.open("a", encoding="utf-8", newline="") as f:
+                f.write(content + _CRLF2)
+            st.export_bytes = path.stat().st_size
+            st.done += batch
+        elif len(batch) > 1:  # one invalid DocID fails the whole batch: take it apart, one id per unit
+            st.isolate_until = cursor + len(batch)
+            save_state(st, folder)
+            continue
+        else:  # a single id the site refuses
+            st.failed += batch
         st.export_cursor += len(batch)
         save_state(st, folder)
         await progress(
@@ -216,10 +268,12 @@ async def _export(st: RunState, folder: Path, deadline: float, progress: Progres
     save_state(st, folder)
 
 
-async def advance(st: RunState, folder: Path, budget_s: float, progress: ProgressFn | None = None) -> bool:
-    """Work until finished or `budget_s` seconds have passed. Returns True when the run is complete.
-    The deadline is only checked between units (a page, an export batch), so a call can overshoot by
-    one unit — normally a few seconds; up to ~70 s when a batch has to be taken apart to find a bad DocID."""
+async def advance(
+    st: RunState, folder: Path, budget_s: float, progress: ProgressFn | None = None, spent_s: float = 0.0
+) -> bool:
+    """Work until finished or the budget is used up. `spent_s` is time this call already used (fetching
+    page 1 before the run existed). Returns True when the run is complete. The deadline is checked between
+    units (one page, one export batch, one single id), so a call overshoots by at most one unit."""
     raw_progress = progress or _no_progress
     last = [-1.0]
 
@@ -229,7 +283,7 @@ async def advance(st: RunState, folder: Path, budget_s: float, progress: Progres
             await raw_progress(done, total, message)
 
     t0 = _now()
-    deadline = t0 + budget_s
+    deadline = t0 + max(budget_s - spent_s, 0.0)
     try:
         if not st.harvest_done:
             await _harvest(st, folder, deadline, progress)
@@ -237,12 +291,13 @@ async def advance(st: RunState, folder: Path, budget_s: float, progress: Progres
             await _export(st, folder, deadline, progress)
     finally:
         st.calls += 1
-        st.elapsed_s += _now() - t0
+        st.elapsed_s += (_now() - t0) + spent_s
         save_state(st, folder)
     done = st.harvest_done and st.export_done
     if done:
         write_final_files(st, folder)
-        await progress(_units_total(st), _units_total(st), "完成")
+        if not st.gave_up:  # an abandoned run must not look finished in a progress bar
+            await progress(_units_total(st), _units_total(st), "完成")
     else:
         write_partial_csv(st, folder)
     return done
@@ -275,7 +330,7 @@ def export_lines(st: RunState) -> list[str]:
     if st.unattempted:
         lines.append(f"  【因中斷未處理】{len(st.unattempted)} 篇（沒有發出匯出請求，不代表 DocID 無效）")
     if st.export_problem:
-        lines.append(f"  【匯出中斷】{st.export_problem}")
+        lines.append(f"  【匯出中斷】連續失敗 {MAX_ERROR_STREAK} 次後放棄：{st.export_problem}")
     return lines
 
 
@@ -284,11 +339,12 @@ def write_final_files(st: RunState, folder: Path) -> None:
     _write_csv(items, folder)
     when = datetime.fromisoformat(st.started)
     note = f"執行方式：分 {st.calls} 次呼叫完成，累計約 {st.elapsed_s:.0f} 秒" if st.calls > 1 else ""
+    harvest_error = f"連續失敗 {MAX_ERROR_STREAK} 次後放棄：{st.harvest_error}" if st.harvest_error else ""
     (folder / "search_log.txt").write_text(
         search_export.build_log(
             query=st.query, when=when, reported_total=st.total, fetched=st.fetched, deduped=st.deduped,
             unique=len(items), pages_fetched=st.pages_fetched, page_size=PAGE_SIZE, cap=st.max_total,
-            items=items, error=st.harvest_error, export_lines=export_lines(st), run_note=note,
+            items=items, error=harvest_error, export_lines=export_lines(st), run_note=note,
         ),
         encoding="utf-8",
     )
@@ -306,11 +362,18 @@ def summary(st: RunState, folder: Path, budget_s: float | None = None) -> str:
             if not st.harvest_done
             else f"匯出書目 {st.export_cursor}/{len(st.ids)} 篇"
         )
-        head = (
-            f"【已暫停，尚未完成】時間預算（{budget_s:.0f} 秒）用完；進度：{where}。\n"
-            f"請再呼叫一次 airiti_search_all(resume=\"{folder.name}\") 繼續，其他參數不用重填；"
-            "重複呼叫直到不再出現【已暫停】為止。"
-        )
+        if st.error_streak:
+            head = (
+                f"【因錯誤暫停，尚未完成】{st.last_error}（連續第 {st.error_streak}/{MAX_ERROR_STREAK} 次失敗）；進度：{where}。\n"
+                f"請稍候再呼叫 airiti_search_all(resume=\"{folder.name}\") 重試；"
+                f"連續失敗 {MAX_ERROR_STREAK} 次會放棄，並把已取得的部分標示為不完整。"
+            )
+        else:
+            head = (
+                f"【已暫停，尚未完成】時間預算（{budget_s:.0f} 秒）用完；進度：{where}。\n"
+                f"請再呼叫一次 airiti_search_all(resume=\"{folder.name}\") 繼續，其他參數不用重填；"
+                "重複呼叫直到不再出現【已暫停】為止。"
+            )
         head += f"\n查詢「{st.query}」：華藝回報共 {st.total} 筆。"
     out = [head, f"資料夾：{folder}"]
     if st.finished:

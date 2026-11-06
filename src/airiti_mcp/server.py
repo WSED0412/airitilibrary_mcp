@@ -255,11 +255,10 @@ async def airiti_search_all(
             except Exception:  # progress is a courtesy; never let it kill a long run
                 logging.getLogger(__name__).debug("progress report failed", exc_info=True)
 
+    st = None
+    spent = 0.0
     if resume.strip():
         folder = harvest.resolve_run_folder(resume)
-        st = harvest.load_state(folder)
-        if st.finished:  # nothing left to do: show the result again
-            return harvest.summary(st, folder)
     else:
         query = (query or "").strip()
         if not query:
@@ -269,12 +268,22 @@ async def airiti_search_all(
         export_key = (export_format or "").strip().lower()
         if export_key and export_key not in cite_export.FORMATS:
             raise AiritiError(f"不支援的 export_format「{export_format}」。可用：{'、'.join(cite_export.FORMATS)}，或留空不匯出。")
+        t_call = harvest.now()
         st, hint = await harvest.start_run(query, max_total, export_key)
+        spent = harvest.now() - t_call  # fetching page 1 counts against this call's budget
         if st is None:
             return f"查詢「{query}」：華藝回報 0 筆結果，沒有產生檔案。\n" + hint
         folder = search_export.export_root() / search_export.run_folder_name(query, datetime.fromisoformat(st.started))
         folder.mkdir(parents=True, exist_ok=True)
         harvest.save_state(st, folder)
 
-    finished = await harvest.advance(st, folder, time_budget_s, progress)
-    return harvest.summary(st, folder, None if finished else time_budget_s)
+    lock = harvest.run_lock(folder.name)
+    if lock.locked():  # never advance one run from two calls at once (they would repeat each other's work)
+        return f"檢索「{folder.name}」正在另一個呼叫裡執行中，請等它回傳後再用 resume 呼叫，不要同時跑兩個。"
+    async with lock:
+        if st is None:
+            st = harvest.load_state(folder)  # read inside the lock: the previous call may have just finished
+            if st.finished:  # nothing left to do: show the result again
+                return harvest.summary(st, folder)
+        finished = await harvest.advance(st, folder, time_budget_s, progress, spent_s=spent)
+        return harvest.summary(st, folder, None if finished else time_budget_s)

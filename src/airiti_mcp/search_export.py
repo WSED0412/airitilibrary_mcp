@@ -7,6 +7,7 @@ import csv
 import io
 import os
 import re
+import unicodedata
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -36,7 +37,8 @@ def is_preprint(it: SearchItem) -> bool:
 
 
 def _norm_title(title: str) -> str:
-    return re.sub(r"[\W_]+", "", (title or "").casefold())
+    # NFKC folds full-width letters/digits ("５Ｇ" -> "5G"), which print layouts switch between freely
+    return re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", title or "").casefold())
 
 
 def _norm_author(name: str) -> str:
@@ -47,11 +49,12 @@ def _norm_author(name: str) -> str:
 def duplicate_groups(items: list[SearchItem]) -> dict[str, str]:
     """doc_id -> group label ("D1", "D2", ...) for records that share normalised title AND author set.
     Only flags; nothing is removed (which record to keep is the reviewer's call). Records with the same
-    title but different authors are different papers and are not flagged."""
+    title but different authors are different papers, and records without any author are never grouped
+    ("編者的話" in two journals is not one article)."""
     buckets: dict[tuple[str, frozenset[str]], list[str]] = {}
     for it in items:
         key = (_norm_title(it.title), frozenset(a for a in map(_norm_author, it.authors) if a))
-        if key[0]:
+        if key[0] and key[1]:  # no author -> editorials, tables of contents...: same title is not same paper
             buckets.setdefault(key, []).append(it.doc_id)
     out: dict[str, str] = {}
     n = 0
