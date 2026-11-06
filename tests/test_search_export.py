@@ -1,6 +1,7 @@
 """airiti_search_all, offline: the site is replaced by a fake that serves 20 items per page."""
 import csv
 import io
+import json
 
 import pytest
 
@@ -12,8 +13,12 @@ from airiti_mcp.parsers import SearchItem, SearchPage
 from airiti_mcp.search_export import build_csv, build_log, run_folder_name
 
 
+CRLF = chr(13) + chr(10)
+
+
 def _item(n: int, kind: str = "期刊") -> SearchItem:
-    return SearchItem(f"DOC{n}", f"篇名{n}", [f"作者{n}", "乙"], "刊名/2024", kind, f"https://x/{n}", n % 2 == 0)
+    doc_id = f"U{n}" if kind == "學位論文" else f"DOC{n}"
+    return SearchItem(doc_id, f"篇名{n}", [f"作者{n}", "乙"], "刊名/2024", kind, f"https://x/{n}", n % 2 == 0)
 
 
 @pytest.fixture
@@ -21,7 +26,7 @@ def fake_site(monkeypatch, tmp_path):
     """total results served 20 per page; `fail_page` raises a network error; `overlap` repeats the
     last item of each page at the start of the next (the site can shift results between requests)."""
     monkeypatch.setenv("AIRITI_EXPORT_DIR", str(tmp_path))
-    state = {"total": 45, "fail_page": None, "overlap": False}
+    state = {"total": 45, "fail_page": None, "overlap": False, "bad_id": None, "export_calls": []}
 
     async def fetch(query, page, page_size):
         if state["fail_page"] == page:
@@ -34,8 +39,16 @@ def fake_site(monkeypatch, tmp_path):
         page = int(html)
         start = (page - 1) * 20 - (1 if state["overlap"] and page > 1 else 0)
         end = min(page * 20, state["total"])
-        return SearchPage(total=state["total"], items=[_item(n) for n in range(start, end)])
+        return SearchPage(total=state["total"], items=[_item(n, "學位論文" if n % 10 == 3 else "期刊") for n in range(start, end)])
 
+    async def fake_export(ids, site_type):
+        state["export_calls"].append(list(ids))
+        if state["bad_id"] in ids:  # the real site fails the whole batch and does not say which id
+            return json.dumps({"ReturnValue": 1, "ReturnMessage": "處理失敗", "ReturnData": None})
+        content = "".join(f"TY  - JOUR{CRLF}T1  - {i}{CRLF}ER  - {CRLF}{CRLF}" for i in ids)
+        return json.dumps({"ReturnValue": 0, "ReturnData": {"ID": "x", "Content": content}})
+
+    monkeypatch.setattr(server.client, "fetch_cite_export", fake_export)
     monkeypatch.setattr(server.client, "fetch_search_html", fetch)
     monkeypatch.setattr(server.parsers, "parse_search", parse)
     return state, tmp_path
@@ -128,3 +141,39 @@ def test_run_folder_name_is_filesystem_safe():
     name = run_folder_name('鷹架: 數學/解題?*"', datetime(2026, 11, 6, 15, 0, 0))
     assert name == "20261106_150000_鷹架_數學_解題"
     assert run_folder_name("???", datetime(2026, 11, 6, 15, 0, 0)).endswith("_query")
+
+
+async def test_search_all_exports_merged_file_and_skips_theses(fake_site):
+    state, root = fake_site
+    out = await server.airiti_search_all("x", export_format="ris")
+    d = _only_run_dir(root)
+    text = (d / "export.ris").read_bytes().decode("utf-8")
+    assert text.count("TY  - JOUR") == 40 and "T1  - U3" not in text and "T1  - DOC0" in text  # 45 - 5 theses
+    assert [len(c) for c in state["export_calls"]] == [20, 20]  # batches of 20
+    log = (d / "search_log.txt").read_text(encoding="utf-8")
+    assert "成功 40 篇" in log and "略過學位論文 5 篇" in log and "匯出失敗" not in log
+    assert str(d / "export.ris") in out
+
+
+async def test_search_all_isolates_invalid_doc_id_in_batch(fake_site):
+    state, root = fake_site
+    state["bad_id"] = "DOC7"
+    await server.airiti_search_all("x", export_format="endnote")
+    d = _only_run_dir(root)
+    text = (d / "export.enw").read_text(encoding="utf-8")
+    assert text.count("TY  - JOUR") == 39 and "T1  - DOC7" + CRLF not in text and "T1  - DOC6" in text
+    log = (d / "search_log.txt").read_text(encoding="utf-8")
+    assert "成功 39 篇" in log and "匯出失敗" in log and "DOC7" in log
+
+
+async def test_search_all_without_export_format_does_not_export(fake_site):
+    state, root = fake_site
+    await server.airiti_search_all("x")
+    assert state["export_calls"] == [] and not list(_only_run_dir(root).glob("export.*"))
+
+
+async def test_search_all_rejects_bad_export_format_before_any_request(fake_site):
+    state, root = fake_site
+    with pytest.raises(ToolError):
+        await server.airiti_search_all("x", export_format="pdf")
+    assert list(root.iterdir()) == []

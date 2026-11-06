@@ -43,6 +43,7 @@ def build_csv(items: list[SearchItem]) -> str:
 def build_log(
     *, query: str, when: datetime, reported_total: int, fetched: int, unique: int,
     pages_fetched: int, page_size: int, cap: int, items: list[SearchItem], error: str = "",
+    export_lines: list[str] | None = None,
 ) -> str:
     truncated = reported_total > cap
     kinds = Counter(it.kind or "（未標示）" for it in items)
@@ -61,6 +62,8 @@ def build_log(
         "取得筆數上限：" + f"{cap}" + ("（總筆數超過上限，結果被截斷，不是完整結果）" if truncated else "（未觸及上限）"),
         "類型分布：" + "；".join(f"{k} {n}" for k, n in kinds.most_common()),
     ]
+    if export_lines:
+        lines += [""] + export_lines
     if error:
         lines += ["", f"【不完整】抓取中途失敗：{error}"]
     lines += [
