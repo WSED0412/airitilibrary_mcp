@@ -505,3 +505,22 @@ async def test_a_thesis_costs_no_extra_export_request_and_gets_no_issue_note(exp
     det = await harvest.fetch_detail(doc_id)
     assert export_site["export_calls"] == []  # a thesis has no issue to look up
     assert not any("期號" in n for n in det.notes)  # and no confusing "page vs export" note
+
+
+def test_airitis_no_abstract_placeholder_is_not_presented_as_an_abstract():
+    from airiti_mcp.parsers import NO_ABSTRACT_PLACEHOLDER
+
+    assert NO_ABSTRACT_PLACEHOLDER == "文章暫無收錄摘要"
+    head_only = DETAIL.split("<body>")[0] + "<body></body></html>"  # no abstract block in the page body
+    # (1) only the meta tag carries the placeholder - what the real site does (4 of 20 pages)
+    d = parse_detail(head_only.replace("content='被截斷的摘…'", "content='文章暫無收錄摘要'"), "ID")
+    assert d.abstract == "" and not d.abstract_is_truncated
+    assert any("沒有摘要" in n for n in d.notes) and not any("可能被截斷" in n for n in d.notes)
+    # (2) the page body carries it while the meta has real (truncated) text: the placeholder is ignored, the meta is used
+    d = parse_detail(DETAIL.replace("完整摘要。", "文章暫無收錄摘要"), "ID")
+    assert d.abstract == "被截斷的摘…" and d.abstract_is_truncated
+    # (3) both carry it
+    both = DETAIL.replace("完整摘要。", "文章暫無收錄摘要").replace("content='被截斷的摘…'", "content='文章暫無收錄摘要'")
+    assert parse_detail(both, "ID").abstract == ""
+    # a real truncated meta abstract is still used as before
+    assert parse_detail(head_only, "ID").abstract == "被截斷的摘…"

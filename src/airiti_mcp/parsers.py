@@ -154,6 +154,10 @@ class Detail:
     fulltext_marker: bool = False  # page says 可全文下載 (a label only; access may still need login/IP)
 
 
+# What Airiti puts in the abstract slots of an article it holds no abstract for (found by comparing 20 pages with their
+# RIS exports: 4 of 20 pages carried it in citation_abstract while the export had no abstract at all).
+NO_ABSTRACT_PLACEHOLDER = "文章暫無收錄摘要"
+
 THESIS_JOURNAL_SUFFIXES = ("學位論文", "碩士論文", "博士論文", "碩士班論文", "博士班論文")
 
 
@@ -212,14 +216,16 @@ def parse_detail(html: str, doc_id: str, with_references: bool = False, with_cit
     abstract, kw_zh_body = _abstract_block(tree, "div.academicAbstractSet", _ABSTRACT_TITLES)
     parallel, kw_en_body = _abstract_block(tree, "div.academicAlignAbstractSet", _PARALLEL_TITLES)
 
+    if abstract.strip() == NO_ABSTRACT_PLACEHOLDER:  # Airiti's "no abstract on record" text is not an abstract
+        abstract = ""
     truncated = False
     if not abstract:
         meta_abs = _meta(tree, "citation_abstract")
-        if meta_abs:
+        if meta_abs and meta_abs.strip() != NO_ABSTRACT_PLACEHOLDER:
             abstract, truncated = meta_abs, True
             notes.append("頁面內文找不到完整摘要區塊，以下摘要來自 meta citation_abstract，可能被截斷。")
         else:
-            notes.append("此文獻頁面沒有摘要（內文與 meta 皆無）。")
+            notes.append("此文獻頁面沒有摘要（內文沒有，meta 也沒有，或只是華藝的「文章暫無收錄摘要」佔位文字）。")
     if not parallel:
         notes.append("此文獻沒有並列（英文）摘要。")
 
