@@ -120,8 +120,12 @@ class RunState:
 
     def unique_now(self) -> list[dict]:
         """Rows de-duplicated by DocID and cut to the cap (what results.csv shows right now)."""
+        items = self.items
+        if len(self.row_page) == len(self.row_slot) == len(items):  # records recovered by boundary repair sit at the end
+            order = sorted(range(len(items)), key=lambda i: (self.row_page[i], self.row_slot[i]))  # stable
+            items = [items[i] for i in order]
         seen: set[str] = set()
-        out = [d for d in self.items if not (d["doc_id"] in seen or seen.add(d["doc_id"]))]
+        out = [d for d in items if not (d["doc_id"] in seen or seen.add(d["doc_id"]))]
         return out[: self.max_total]
 
     @property
@@ -208,7 +212,7 @@ async def fetch_detail(
             if attempt == len(waits):
                 raise AiritiShellPageError(f"{e}（已重試 {len(waits)} 次，仍是首頁殼）") from e
             continue
-        if not det.volume:
+        if not det.volume and not parsers.is_thesis_detail(det):  # theses have no issue to look up
             await _correct_issue(det)
         return det
     raise AssertionError("unreachable")  # the loop above always returns or raises
@@ -433,7 +437,7 @@ async def advance(
 
     async def progress(done: float, total: float | None, message: str) -> None:
         if total is not None and message != DONE_MESSAGE:
-            done = min(done, total - 0.5)  # only the final DONE_MESSAGE may reach the total
+            done = done * (total - 0.5) / total  # scaled, strictly increasing: only DONE_MESSAGE reaches the total
         if done > last[0]:  # MCP requires progress to increase with every notification
             last[0] = done
             await raw_progress(done, total, message)

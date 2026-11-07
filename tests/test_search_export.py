@@ -1074,6 +1074,7 @@ async def test_a_finished_run_ends_with_the_done_message_and_progress_stays_stri
     values = [d for d, _, _ in seen]
     assert values == sorted(values) and len(set(values)) == len(values)
     assert seen[-1] == (6, 6, "完成") and all(v < 6 for v in values[:-1])  # only the final message reaches the total
+    assert any(m == "已匯出 45/45 篇" for _, _, m in seen)  # the last export batch is reported too, not swallowed
 
 
 async def test_every_tool_is_named_in_the_server_instructions():
@@ -1158,3 +1159,15 @@ async def test_two_adjacent_tied_boundaries_are_both_repaired(fake_site, monkeyp
     ids = [r[1] for r in _rows(d)[1:]]
     assert len(ids) == 60 and sorted(ids) == sorted(f"DOC{i}" for i in range(60))
     assert harvest.load_state(d).fixed_boundaries == [1, 2]  # repairing only the first boundary would leave DOC40 missing
+
+
+
+def test_the_provisional_csv_of_a_paused_run_lists_recovered_records_in_rank_order():
+    st = harvest.RunState("q", 100, "", "2026-01-01T00:00:00+08:00")
+    # records 1,2 on page 1, record 3 on page 2; then boundary repair appended X (slot 2 of page 1) at the end
+    st.items = [{"doc_id": "1"}, {"doc_id": "2"}, {"doc_id": "3"}, {"doc_id": "X"}]
+    st.row_page = [1, 1, 2, 1]
+    st.row_slot = [1, 2, 1, 2]
+    assert [d["doc_id"] for d in st.unique_now()] == ["1", "2", "X", "3"]  # was 1, 2, 3, X
+    st.row_page = []  # state written before row_page existed: fall back to arrival order
+    assert [d["doc_id"] for d in st.unique_now()] == ["1", "2", "3", "X"]

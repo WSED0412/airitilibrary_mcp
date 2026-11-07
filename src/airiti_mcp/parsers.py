@@ -154,6 +154,14 @@ class Detail:
     fulltext_marker: bool = False  # page says 可全文下載 (a label only; access may still need login/IP)
 
 
+THESIS_JOURNAL_SUFFIXES = ("學位論文", "碩士論文", "博士論文", "碩士班論文", "博士班論文")
+
+
+def is_thesis_detail(d: Detail) -> bool:
+    """A thesis has a DocID starting with U..., and its "journal" field is a department name ending in ...論文."""
+    return bool(re.match(r"U\d", d.doc_id)) or d.journal.endswith(THESIS_JOURNAL_SUFFIXES)
+
+
 def _meta_all(tree: LexborHTMLParser, name: str) -> list[str]:
     out = []
     for n in tree.css("meta"):

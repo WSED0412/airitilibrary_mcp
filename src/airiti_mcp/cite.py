@@ -17,28 +17,28 @@ from __future__ import annotations
 import re
 
 from .errors import AiritiError
-from .parsers import Detail
+from .parsers import Detail, is_thesis_detail
 
 _CJK = re.compile(r"[\u3400-\u9fff]")
 
 
 def apa7(d: Detail) -> str:
-    missing = [n for n, v in (("作者", d.authors), ("出版年", d.date), ("期刊名", d.journal)) if not v]
+    missing = [n for n, v in (("作者", d.authors), ("出版年", d.date), ("期刊名", d.journal), ("篇名", d.title)) if not v]
     if missing:
         raise AiritiError(
             f"書目資料不足，無法產生 APA 引用（缺：{'、'.join(missing)}）。"
             "目前只支援有刊名的期刊論文；學位論文等請手動引用。"
         )
-    if re.match(r"U\d", d.doc_id) or d.journal.endswith(("學位論文", "碩士論文", "博士論文", "碩士班論文", "博士班論文")):
+    if is_thesis_detail(d):
         raise AiritiError("這是學位論文（頁面的「刊名」欄是校系名稱，不是期刊），目前不產生 APA 引用，請手動引用。")
     ym = re.match(r"\s*(\d{4})", d.date)
     if not ym:
         raise AiritiError(f"無法從日期「{d.date}」解析出版年，不產生引用。")
     year = ym.group(1)
 
-    if not (_CJK.search(d.title) and _CJK.search(d.authors[0])):
+    if not (_CJK.search(d.title) and all(_CJK.search(a) for a in d.authors)):  # one Latin-named co-author is enough to refuse
         raise AiritiError(
-            "目前只支援中文期刊論文（篇名與第一作者為中文）的 APA 引用。這篇看起來是英文或外文論文：華藝給的作者是"
+            "目前只支援中文期刊論文（篇名與所有作者姓名皆為中文）的 APA 引用。這篇看起來是英文或外文論文：華藝給的作者是"
             "「名 姓」的全名，APA 要的是「姓, 名縮寫」，自動轉換很容易出錯，所以不產生。"
             "請改用 airiti_export_citation 匯出 RIS 或 BibTeX，到 EndNote／Zotero 讓軟體排版。"
         )
@@ -58,4 +58,4 @@ def apa7(d: Detail) -> str:
         vol_iss = ""
     body = f"{d.title}。*{d.journal}*" + vol_iss + pages + "。"
     link = f"https://doi.org/{d.doi}" if d.doi else d.url
-    return head + body + link
+    return head + body + " " + link  # the space lets Markdown viewers turn the DOI / URL into a link

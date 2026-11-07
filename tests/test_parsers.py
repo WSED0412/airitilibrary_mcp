@@ -97,14 +97,14 @@ def test_detail_not_an_article_page():
 
 
 def test_apa_chinese():
-    assert apa7(parse_detail(DETAIL, "ID")) == "蔡欣倫、王小明（2024）。題目。*期刊名*，*1*（3），19–57。https://doi.org/10.1/x(3).2"
+    assert apa7(parse_detail(DETAIL, "ID")) == "蔡欣倫、王小明（2024）。題目。*期刊名*，*1*（3），19–57。 https://doi.org/10.1/x(3).2"
 
 
 def test_apa_issue_without_volume_is_the_bare_number_with_no_parentheses():
     # Taiwanese APA-7 guides: when the journal has no volume, list only the issue, not italic, "不需括號"
     d = parse_detail(DETAIL, "ID")
     d.volume = ""
-    assert apa7(d) == "蔡欣倫、王小明（2024）。題目。*期刊名*，3，19–57。https://doi.org/10.1/x(3).2"
+    assert apa7(d) == "蔡欣倫、王小明（2024）。題目。*期刊名*，3，19–57。 https://doi.org/10.1/x(3).2"
     d.issue = ""
     assert "*期刊名*，19–57。" in apa7(d)  # neither volume nor issue
     d.first_page = ""
@@ -468,3 +468,40 @@ async def test_if_the_export_cannot_be_reached_no_issue_is_printed_rather_than_a
     assert det.issue == "" and any("所以不列期號" in n for n in det.notes)
     ref = await server.airiti_cite_apa("ID")
     assert "*期刊名*，19–57。" in ref  # journal and pages, but no (possibly wrong) issue number
+
+
+def test_apa_refuses_a_mixed_author_list_and_a_missing_title():
+    from airiti_mcp.errors import AiritiError
+
+    d = parse_detail(DETAIL, "ID")
+    d.authors = ["蔡欣倫", "John Smith"]  # one Latin-named co-author: we do not convert names, so no reference
+    with pytest.raises(AiritiError, match="所有作者姓名皆為中文"):
+        apa7(d)
+    d = parse_detail(DETAIL, "ID")
+    d.title = ""
+    with pytest.raises(AiritiError, match="缺：篇名"):  # not the misleading "this is a foreign-language article"
+        apa7(d)
+
+
+def test_the_doi_is_separated_by_a_space_so_markdown_makes_it_a_link():
+    assert "。 https://doi.org/" in apa7(parse_detail(DETAIL, "ID"))
+
+
+def test_is_thesis_detail_uses_the_docid_and_the_journal_field():
+    from airiti_mcp.parsers import is_thesis_detail
+
+    d = parse_detail(DETAIL, "U0001-12")
+    assert is_thesis_detail(d)  # by DocID
+    d = parse_detail(DETAIL.replace("期刊名", "某大學資訊系學位論文"), "ID")
+    assert is_thesis_detail(d)  # by the journal field
+    assert not is_thesis_detail(parse_detail(DETAIL, "ID"))
+
+
+@pytest.mark.parametrize("doc_id, journal", [("U0001-12", "期刊名"), ("ID", "某大學資訊系學位論文")], ids=["by-docid", "by-journal-field"])
+async def test_a_thesis_costs_no_extra_export_request_and_gets_no_issue_note(export_site, doc_id, journal):
+    from airiti_mcp import harvest
+
+    export_site["pages"] = [NO_VOLUME.replace("期刊名", journal)]  # volume empty, like every thesis
+    det = await harvest.fetch_detail(doc_id)
+    assert export_site["export_calls"] == []  # a thesis has no issue to look up
+    assert not any("期號" in n for n in det.notes)  # and no confusing "page vs export" note
