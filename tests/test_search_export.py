@@ -27,7 +27,7 @@ def fake_site(monkeypatch, tmp_path):
     last item of each page at the start of the next (the site can shift results between requests)."""
     monkeypatch.setenv("AIRITI_EXPORT_DIR", str(tmp_path))
     state = {"total": 45, "fail_page": None, "overlap": False, "bad_id": None, "export_calls": [],
-             "step": 0.0, "export_step": 0.0, "pages": [], "empty": {}, "sleeps": []}
+             "step": 0.0, "export_step": 0.0, "pages": [], "empty": {}, "sleeps": [], "size": 20}
     clock = {"t": 0.0}  # fake time for the pause/resume tests: each request advances it by step / export_step
     monkeypatch.setattr(harvest, "_now", lambda: clock["t"])
 
@@ -39,6 +39,7 @@ def fake_site(monkeypatch, tmp_path):
 
     async def fetch(query, page, page_size):
         state["pages"].append(page)
+        state["size"] = page_size  # parse() runs right after fetch(): it serves exactly the page size that was asked for
         clock["t"] += state["step"]
         if state["fail_page"] == page:
             raise AiritiNetworkError("boom")
@@ -51,10 +52,11 @@ def fake_site(monkeypatch, tmp_path):
         if state["total"] == 0 or html == "E":
             return SearchPage(total=0)
         page = int(html)
-        start = (page - 1) * 20 - (1 if state["overlap"] and page > 1 else 0)
+        size = state["size"]
+        start = (page - 1) * size - (1 if state["overlap"] and page > 1 else 0)
         if start >= state["total"]:  # out of range: the site gives the same "0 筆" block
             return SearchPage(total=0)
-        end = min(page * 20, state["total"])
+        end = min(page * size, state["total"])
         return SearchPage(total=state["total"], items=[_item(n, "學位論文" if n % 10 == 3 else "期刊") for n in range(start, end)])
 
     async def fake_export(ids, site_type):
@@ -62,7 +64,15 @@ def fake_site(monkeypatch, tmp_path):
         clock["t"] += state["export_step"]
         if state["bad_id"] in ids:  # the real site fails the whole batch and does not say which id
             return json.dumps({"ReturnValue": 1, "ReturnMessage": "處理失敗", "ReturnData": None})
-        content = "".join(f"TY  - JOUR{CRLF}T1  - {i}{CRLF}ER  - {CRLF}{CRLF}" for i in ids)
+        def record(i):  # what the site sends depends on the format asked for, and theses (DocID U...) are a different type
+            thesis = i.startswith("U")
+            if site_type == "BibTeX":
+                return "@" + ("phdthesis" if thesis else "article") + "{" + i + "," + CRLF + "title ={" + i + "}," + CRLF + "}" + CRLF + CRLF
+            if site_type == "Endnote":
+                return "%0 " + ("Thesis" if thesis else "Journal Article") + CRLF + "%T " + i + CRLF + CRLF
+            return "TY  - " + ("THES" if thesis else "JOUR") + CRLF + "T1  - " + i + CRLF + "ER  - " + CRLF + CRLF
+
+        content = "".join(record(i) for i in ids)
         return json.dumps({"ReturnValue": 0, "ReturnData": {"ID": "x", "Content": content}})
 
     monkeypatch.setattr(server.client, "fetch_cite_export", fake_export)
@@ -172,7 +182,7 @@ async def test_search_all_exports_merged_file_and_includes_theses(fake_site):
     out = await server.airiti_search_all("x", export_format="ris")
     d = _only_run_dir(root)
     text = (d / "export.ris").read_bytes().decode("utf-8")
-    assert text.count("TY  - JOUR") == 45 and "T1  - U3" in text and "T1  - DOC0" in text  # the 5 theses are exported too
+    assert text.count("TY  - JOUR") == 40 and text.count("TY  - THES") == 5 and "T1  - U3" in text and "T1  - DOC0" in text  # theses too
     assert [len(c) for c in state["export_calls"]] == [20, 20, 5]  # batches of 20
     log = (d / "search_log.txt").read_text(encoding="utf-8")
     assert "成功 45 篇" in log and "其中學位論文 5 篇" in log and "略過" not in log and "匯出失敗" not in log
@@ -185,7 +195,7 @@ async def test_search_all_isolates_invalid_doc_id_in_batch(fake_site):
     await server.airiti_search_all("x", export_format="endnote")
     d = _only_run_dir(root)
     text = (d / "export.enw").read_text(encoding="utf-8")
-    assert text.count("TY  - JOUR") == 44 and "T1  - DOC7" + CRLF not in text and "T1  - DOC6" in text
+    assert text.count("%0 ") == 44 and "%T DOC7" + CRLF not in text and "%T DOC6" in text  # an EndNote file, one record per id
     log = (d / "search_log.txt").read_text(encoding="utf-8")
     assert "成功 44 篇" in log and "匯出失敗" in log and "DOC7" in log
 
@@ -275,7 +285,7 @@ async def test_export_citation_tool_validation_and_output(fake_site):
     out = await server.airiti_export_citation(["DOC1", "DOC2", "DOC1"], "ris")  # duplicate dropped
     assert "共 2 篇" in out and out.count("TY  - JOUR") == 2 and state["export_calls"] == [["DOC1", "DOC2"]]
     one = await server.airiti_export_citation("DOC9", "bibtex")  # a bare string is accepted
-    assert "共 1 篇" in one and state["export_calls"][-1] == ["DOC9"]
+    assert "共 1 篇" in one and state["export_calls"][-1] == ["DOC9"] and "@article{DOC9" in one  # and it IS BibTeX
 
 
 async def test_export_citation_tool_reports_site_message_on_failure(fake_site):
@@ -329,7 +339,7 @@ async def test_pauses_in_export_then_resumes_without_duplicates(fake_site):
     first = await server.airiti_search_all("x", export_format="ris", time_budget_s=10)
     d = _only_run_dir(root)
     assert "已暫停" in first and "匯出書目 20/45" in first
-    assert (d / "export.ris").read_bytes().decode("utf-8").count("TY  - JOUR") == 20
+    assert (d / "export.ris").read_bytes().decode("utf-8").count("TY  - ") == 20  # 18 articles + 2 theses in the first batch
 
     second = first
     for _ in range(5):  # 3 batches of 20/20/5, each "takes" 50 s against a 10 s budget: one batch per call
@@ -570,7 +580,7 @@ async def test_old_state_without_export_bytes_is_never_truncated(fake_site):
     state["export_step"] = 0.0
     await server.airiti_search_all(resume=d.name, time_budget_s=10)
     after = (d / "export.ris").read_bytes()
-    assert after.startswith(before) and after.decode("utf-8").count("TY  - JOUR") == 45  # nothing was wiped
+    assert after.startswith(before) and after.decode("utf-8").count("TY  - ") == 45  # nothing was wiped
 
 
 def test_state_file_version_is_checked(tmp_path):
@@ -601,7 +611,7 @@ async def test_merged_ris_keeps_every_end_tag_intact(fake_site):
     state, root = fake_site
     await server.airiti_search_all("x", export_format="ris")
     text = (_only_run_dir(root) / "export.ris").read_bytes().decode("utf-8")
-    assert text.count("ER  - " + CRLF) == text.count("TY  - JOUR") == 45  # last record of each batch included
+    assert text.count("ER  - " + CRLF) == text.count("TY  - ") == 45  # last record of each batch included
 
 
 async def test_export_citation_save_writes_a_file_and_keeps_content_out_of_the_reply(fake_site):
@@ -696,7 +706,7 @@ async def test_export_citation_save_cleans_up_when_writing_fails(fake_site, monk
         return real_open(self, mode, *a, **k)
 
     monkeypatch.setattr(Path, "open", full_disk)
-    with pytest.raises(OSError):
+    with pytest.raises(ToolError, match="No space left on device.*AIRITI_EXPORT_DIR"):  # the model gets the reason + a way out
         await server.airiti_export_citation(["DOC1"], "ris", save=True)
     assert _run_dirs(root) == []  # no empty folder left behind
 
@@ -800,7 +810,7 @@ async def test_single_page_search_verifies_a_zero_before_reporting_no_results(fa
     state, root = fake_site
     state["empty"] = {1: 1}
     ok = await server.airiti_search("x", 1, 10)
-    assert "共 45 筆" in ok and state["pages"] == [1, 1]
+    assert "共 45 筆" in ok and "本頁 10 筆" in ok and state["pages"] == [1, 1]  # 10 per page, as asked
     state["pages"].clear()
     state["empty"] = {1: 99}
     zero = await server.airiti_search("x", 1, 10)
@@ -989,3 +999,162 @@ async def test_pause_during_boundary_repair_says_so(fake_site, monkeypatch):
         outs.append(await server.airiti_search_all(resume=d.name, time_budget_s=10))
     assert any("邊界修補中（結果頁已抓完 3/3）" in o for o in outs)
     assert not any("抓取結果頁 3/3" in o for o in outs)
+
+
+# ======================================================== batch 1: hardening and decisions
+async def test_a_big_export_is_saved_to_a_file_automatically(fake_site, monkeypatch):
+    state, root = fake_site
+    monkeypatch.setattr(server, "EXPORT_INLINE_LIMIT", 50)
+    big = await server.airiti_export_citation(["DOC1", "DOC2", "DOC3"], "ris")  # three records = 100 characters > 50
+    assert "自動存檔" in big and "內容沒有放進對話" in big and "TY  - " not in big
+    d = _only_run_dir(root)
+    assert (d / "export.ris").read_bytes().decode("utf-8").count("TY  - JOUR") == 3
+    small = await server.airiti_export_citation(["DOC4"], "ris")  # one record = 32 characters stays in the reply
+    assert "TY  - JOUR" in small and "自動存檔" not in small and len(_run_dirs(root)) == 1
+
+
+async def test_repair_that_keeps_failing_on_the_second_page_counts_strikes_and_gives_up(fake_site, monkeypatch):
+    state, root = fake_site
+    _tied_boundary_site(monkeypatch, tails=[19], heads=[19])
+    orig = server.client.fetch_search_html
+
+    async def page2_down(q, page, size):
+        if len(state["pages"]) >= 3 and page == 2:  # pages 1,2,3 were the harvest; then only page 2 fails
+            state["pages"].append(page)
+            raise AiritiNetworkError("down")
+        return await orig(q, page, size)
+
+    monkeypatch.setattr(server.client, "fetch_search_html", page2_down)
+    await server.airiti_search_all("x")
+    d = _only_run_dir(root)
+    assert harvest.load_state(d).error_streak == 1
+    await server.airiti_search_all(resume=d.name)
+    assert harvest.load_state(d).error_streak == 2  # it used to be stuck at 1: page 1 answering reset the count
+    await server.airiti_search_all(resume=d.name)
+    st = harvest.load_state(d)
+    assert st.finished and st.error_streak == 0 and st.repair_error  # third strike: the repair (not the run) gave up
+    assert "因連線問題中止" in (d / "search_log.txt").read_text(encoding="utf-8")
+
+
+async def test_the_export_gets_its_own_three_strikes_after_the_harvest_gave_up(fake_site, monkeypatch):
+    state, root = fake_site
+    state["fail_page"] = 2
+    attempts = []
+
+    async def export_down(ids, site_type):
+        attempts.append(len(ids))
+        raise AiritiNetworkError("blip")
+
+    monkeypatch.setattr(server.client, "fetch_cite_export", export_down)
+    await server.airiti_search_all("x", export_format="ris")
+    d = _only_run_dir(root)
+    await server.airiti_search_all(resume=d.name)
+    await server.airiti_search_all(resume=d.name)  # third harvest strike: the harvest gives up and the export starts
+    st = harvest.load_state(d)
+    assert st.harvest_error and not st.finished and st.error_streak == 1 and len(attempts) == 1  # not abandoned at once
+    for _ in range(4):
+        if harvest.load_state(d).finished:
+            break
+        await server.airiti_search_all(resume=d.name)
+    st = harvest.load_state(d)
+    assert st.finished and st.export_problem and len(attempts) == 3  # three strikes of its own
+
+
+async def test_a_finished_run_ends_with_the_done_message_and_progress_stays_strictly_increasing(fake_site, tmp_path):
+    state, root = fake_site
+    st, _ = await harvest.start_run("x", 1000, "ris")
+    folder = tmp_path / "r"
+    folder.mkdir()
+    seen = []
+
+    async def prog(done, total, message):
+        seen.append((done, total, message))
+
+    await harvest.advance(st, folder, 90, prog)
+    values = [d for d, _, _ in seen]
+    assert values == sorted(values) and len(set(values)) == len(values)
+    assert seen[-1] == (6, 6, "完成") and all(v < 6 for v in values[:-1])  # only the final message reaches the total
+
+
+async def test_every_tool_is_named_in_the_server_instructions():
+    names = [t.name for t in await server.mcp.list_tools()]
+    assert {"airiti_search", "airiti_abstract", "airiti_cite_apa", "airiti_search_all", "airiti_export_citation"} <= set(names)
+    text = server.mcp.instructions
+    for name in names:
+        assert name in text, name  # a new tool that the instructions forget to mention fails here
+    assert "resume" in text and "save=True" in text
+
+
+async def test_a_disk_error_reaches_the_model_with_its_reason(fake_site, monkeypatch):
+    from pathlib import Path
+
+    from mcp.client import Client
+
+    state, root = fake_site
+    real_open = Path.open
+
+    def full_disk(self, mode="r", *a, **k):
+        if "w" in mode and self.name == "export.ris":
+            raise OSError(28, "No space left on device")
+        return real_open(self, mode, *a, **k)
+
+    monkeypatch.setattr(Path, "open", full_disk)
+    async with Client(server.mcp) as c:
+        res = await c.call_tool("airiti_export_citation", {"doc_ids": ["DOC1"], "format": "ris", "save": True})
+    assert "No space left on device" in str(res) and "AIRITI_EXPORT_DIR" in str(res)  # not just "Error executing tool"
+
+
+def test_parse_cite_export_is_strict_about_what_counts_as_content():
+    from airiti_mcp.cite_export import parse_cite_export
+
+    def body(content):
+        return json.dumps({"ReturnValue": 0, "ReturnData": {"ID": "x", "Content": content}})
+
+    assert parse_cite_export(body("   " + CRLF + "  ")) is None  # blank
+    assert parse_cite_export(body(123)) is None and parse_cite_export(body(["a"])) is None and parse_cite_export(body(None)) is None
+    assert parse_cite_export(body(CRLF + "TY  - JOUR" + CRLF + "ER  - " + CRLF)) == "TY  - JOUR" + CRLF + "ER  - "
+
+
+async def test_two_runs_started_in_the_same_second_get_separate_folders(fake_site, monkeypatch):
+    from datetime import datetime as real
+
+    class Frozen(real):
+        @classmethod
+        def now(cls, tz=None):
+            return real(2026, 11, 6, 15, 0, 0)
+
+    monkeypatch.setattr(harvest, "datetime", Frozen)
+    state, root = fake_site
+    await server.airiti_search_all("x")
+    await server.airiti_search_all("x")
+    names = sorted(p.name for p in _run_dirs(root))
+    assert len(names) == 2 and names[1] == names[0] + "_2"
+    for n in names:
+        assert harvest.load_state(root / n).finished  # the first run was not overwritten by the second
+
+
+async def test_two_adjacent_tied_boundaries_are_both_repaired(fake_site, monkeypatch):
+    state, root = fake_site
+    calls = {"1": 0, "2": 0, "3": 0}
+    # ties (19,20) at boundary 1|2 and (39,40) at boundary 2|3; the site re-rolls both on every request.
+    # Boundary 2's lost record (40) only shows up in page 2's request number 4, i.e. in boundary 2's own repair.
+    sched = {"1": [19, 19, 20], "2h": [19], "2t": [39, 39, 39, 39, 40], "3": [39]}
+
+    def pick(key, n):
+        return sched[key][min(n, len(sched[key]) - 1)]
+
+    def parse(html):
+        n = calls[html]
+        calls[html] += 1
+        if html == "1":
+            return SearchPage(total=60, items=[_item(i) for i in range(0, 19)] + [_item(pick("1", n))])
+        if html == "2":
+            return SearchPage(total=60, items=[_item(pick("2h", n))] + [_item(i) for i in range(21, 39)] + [_item(pick("2t", n))])
+        return SearchPage(total=60, items=[_item(pick("3", n))] + [_item(i) for i in range(41, 60)])
+
+    monkeypatch.setattr(server.parsers, "parse_search", parse)
+    await server.airiti_search_all("x")
+    d = _only_run_dir(root)
+    ids = [r[1] for r in _rows(d)[1:]]
+    assert len(ids) == 60 and sorted(ids) == sorted(f"DOC{i}" for i in range(60))
+    assert harvest.load_state(d).fixed_boundaries == [1, 2]  # repairing only the first boundary would leave DOC40 missing

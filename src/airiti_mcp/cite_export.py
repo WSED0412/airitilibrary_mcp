@@ -54,7 +54,8 @@ def parse_cite_export(body: str) -> str | None:
         data = obj.get("ReturnData")
     except (ValueError, KeyError, TypeError, AttributeError) as e:
         raise AiritiParseError(f"CiteExport 回應不是預期的 JSON 結構：{body[:120]!r}") from e
-    if not ok or not isinstance(data, dict) or not data.get("Content"):
+    content = data.get("Content") if isinstance(data, dict) else None
+    if not ok or not isinstance(content, str) or not content.strip():  # failure, empty, blank or not text
         return None
     # trim the blank lines around the file but keep trailing spaces: RIS ends with the line "ER  - "
-    return data["Content"].lstrip().rstrip("\r\n")
+    return content.lstrip().rstrip("\r\n")

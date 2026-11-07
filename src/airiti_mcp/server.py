@@ -17,8 +17,12 @@ from .errors import AiritiError, AiritiParseError
 mcp = MCPServer(
     "airiti-library",
     instructions=(
-        "查詢華藝線上圖書館（Airiti Library）的文獻書目與摘要。只提供檢索與摘要，不提供全文。"
-        "流程：先用 airiti_search 找文獻拿到 DocID，再用 airiti_abstract 讀摘要。"
+        "查詢華藝線上圖書館（Airiti Library）的文獻書目與摘要，不提供全文。\n"
+        "- 找幾篇文獻：airiti_search（一次一頁）取得 DocID → airiti_abstract 讀摘要；airiti_cite_apa 產生中文期刊論文的 APA 引用。\n"
+        "- 系統性回顧或需要整批結果：airiti_search_all 抓完所有結果頁，存成 CSV 與檢索紀錄；export_format 可同時匯出 "
+        "BibTeX／RIS／EndNote 檔。若回傳【已暫停】，用 resume 參數接著呼叫，直到不再暫停為止。\n"
+        "- 只匯出指定的幾篇：airiti_export_citation；篇數多時內容會自動存成檔案（也可用 save=True 強制存檔），不佔用對話。\n"
+        "檔案都寫在使用者電腦的匯出資料夾。華藝偶爾對有效的頁面回空白，工具會自動重試。"
     ),
 )
 
@@ -40,6 +44,11 @@ def _tool(fn):
             return await fn(*args, **kwargs)
         except AiritiError as e:
             raise ToolError(f"{type(e).__name__}: {e}") from e
+        except OSError as e:  # disk full, no permission...: without this the model only sees "Error executing tool"
+            raise ToolError(
+                f"{type(e).__name__}: {e}（寫入匯出資料夾失敗；請檢查磁碟空間與資料夾權限，"
+                "或用環境變數 AIRITI_EXPORT_DIR 換一個位置）"
+            ) from e
 
     return mcp.tool()(wrapper)
 
@@ -187,6 +196,7 @@ async def airiti_cite_apa(doc_id: str) -> str:
 
 
 MAX_EXPORT = harvest.MAX_EXPORT
+EXPORT_INLINE_LIMIT = 30_000  # characters; a bigger export is saved to a file instead of flooding the conversation
 
 
 @_tool
@@ -196,8 +206,8 @@ async def airiti_export_citation(doc_ids: list[str] | str, format: str = "bibtex
     Args:
         doc_ids: 華藝 DocID 清單，最多 20 個（由 airiti_search 取得）；只匯出一篇時也可直接傳一個字串。
         format: bibtex（預設）、ris、endnote 其中之一。
-        save: 預設 False＝把全文放進回傳內容（20 篇約 3–4 萬字元，會佔用大量對話上下文）。
-            True＝改成直接存成檔案（存到匯出資料夾下新的子資料夾），只回傳檔案路徑與篇數，不把內容放進對話。
+        save: 預設 False＝內容放進回傳（但超過 3 萬字元會自動改成存檔，避免佔滿對話上下文）。
+            True＝一律存成檔案（存到匯出資料夾下新的子資料夾），只回傳檔案路徑與篇數，不把內容放進對話。
     內容來自華藝（含中英文關鍵字、摘要、DOI），本工具只做一項修改：RIS 裡沒有 DOI 的記錄，華藝給的 UR 是相對路徑
     （Article/Detail?docID=…，匯入後連結會壞），這裡補成完整網址；其餘原樣。請把「```」之間的文字存成對應副檔名。
     注意：只要清單裡有一個 DocID 無效，華藝會整批失敗且不指出是哪一個。
@@ -218,7 +228,8 @@ async def airiti_export_citation(doc_ids: list[str] | str, format: str = "bibtex
     if not content:
         hint = "請確認每個 DocID 都完整正確（要原樣取自 airiti_search）。批次失敗時可改單篇匯出找出無效的 DocID。"
         raise AiritiError(f"華藝沒有回傳 {desc} 內容（重試一次仍失敗）。站方訊息：{site_msg or '（無）'}。{hint}")
-    if save:
+    auto = not save and len(content) > EXPORT_INLINE_LIMIT
+    if save or auto:
         folder = search_export.make_export_folder(f"export_{len(ids)}", datetime.now().astimezone())
         path = folder / f"export.{ext}"
         try:
@@ -231,7 +242,8 @@ async def airiti_export_citation(doc_ids: list[str] | str, format: str = "bibtex
             except OSError:
                 pass
             raise
-        return f"{desc}，共 {len(ids)} 篇，已存檔（內容沒有放進對話）：{path}"
+        why = f"內容約 {len(content):,} 字元，超過 {EXPORT_INLINE_LIMIT:,} 字元，所以自動存檔；" if auto else ""
+        return f"{desc}，共 {len(ids)} 篇，已存檔（{why}內容沒有放進對話）：{path}"
     name = ids[0] if len(ids) == 1 else f"airiti_export_{len(ids)}篇"
     return f"{desc}，共 {len(ids)} 篇，建議存成 {name}.{ext}：\n```\n{content}\n```"
 
@@ -293,8 +305,7 @@ async def airiti_search_all(
         spent = harvest.now() - t_call  # fetching page 1 counts against this call's budget
         if st is None:
             return f"查詢「{query}」：華藝回報 0 筆結果，沒有產生檔案。\n" + hint
-        folder = search_export.export_root() / search_export.run_folder_name(query, datetime.fromisoformat(st.started))
-        folder.mkdir(parents=True, exist_ok=True)
+        folder = search_export.make_unique_folder(search_export.run_folder_name(query, datetime.fromisoformat(st.started)))
         harvest.save_state(st, folder)
 
     lock = harvest.run_lock(folder.name)

@@ -23,7 +23,7 @@ def search_html(total="282 個查詢結果", items=()):
 
 def test_search_parses_items_and_prefers_checkbox_docid():
     html = search_html(items=[
-        ITEM.format(key="15601277-49-72+171", click="15601277-49-72%2b171", n=1),
+        ITEM.format(key="15601277-49-72+171", click="15601277-49-72%252b171", n=1),
         ITEM.format(key="U0021-1610", click="U0021-1610", n=2),
     ])
     r = parse_search(html)
@@ -100,12 +100,59 @@ def test_apa_chinese():
     assert apa7(parse_detail(DETAIL, "ID")) == "蔡欣倫、王小明（2024）。題目。*期刊名*，*1*（3），19–57。https://doi.org/10.1/x(3).2"
 
 
-def test_apa_issue_without_volume():
+def test_apa_issue_without_volume_is_the_bare_number_with_no_parentheses():
+    # Taiwanese APA-7 guides: when the journal has no volume, list only the issue, not italic, "不需括號"
     d = parse_detail(DETAIL, "ID")
     d.volume = ""
-    assert "，（3），19–57。" in apa7(d)
-    d.authors = ["Smith, J."]
-    assert "*期刊名*, (3), 19–57." in apa7(d)
+    assert apa7(d) == "蔡欣倫、王小明（2024）。題目。*期刊名*，3，19–57。https://doi.org/10.1/x(3).2"
+    d.issue = ""
+    assert "*期刊名*，19–57。" in apa7(d)  # neither volume nor issue
+    d.first_page = ""
+    assert "*期刊名*。" in apa7(d)  # and no pages either
+
+
+def test_apa_lists_up_to_20_authors_and_elides_the_middle_beyond_that():
+    d = parse_detail(DETAIL, "ID")
+    d.authors = [f"作者{i}" for i in range(1, 21)]
+    assert apa7(d).startswith("、".join(d.authors) + "（2024）")  # 20: all of them
+    d.authors = [f"作者{i}" for i in range(1, 22)]
+    head = apa7(d).split("（2024）")[0]
+    assert head == "、".join(f"作者{i}" for i in range(1, 20)) + "、……、作者21"  # 21: first 19, ellipsis, last
+
+
+def test_apa_refuses_articles_that_are_not_in_chinese():
+    from airiti_mcp.errors import AiritiError
+
+    d = parse_detail(DETAIL, "ID")
+    d.authors = ["Hsiu-Ho Wang"]  # how Airiti writes English authors: "Given Family", not APA's "Family, G.-H."
+    with pytest.raises(AiritiError, match="airiti_export_citation"):
+        apa7(d)
+    d = parse_detail(DETAIL, "ID")
+    d.title = "An English title"  # Chinese author, English article
+    with pytest.raises(AiritiError, match="中文期刊論文"):
+        apa7(d)
+
+
+def test_apa_refuses_when_data_is_missing_or_the_year_is_unreadable():
+    from airiti_mcp.errors import AiritiError
+
+    d = parse_detail(DETAIL, "ID")
+    d.authors = []
+    with pytest.raises(AiritiError, match="缺：作者"):
+        apa7(d)
+    d = parse_detail(DETAIL, "ID")
+    d.date = "民國一一三年"
+    with pytest.raises(AiritiError, match="無法從日期"):
+        apa7(d)
+
+
+def test_apa_refuses_a_thesis_by_its_docid_even_if_the_journal_field_looks_ordinary():
+    from airiti_mcp.errors import AiritiError
+
+    d = parse_detail(DETAIL, "U0001-1234")  # DocID of a thesis, journal field = a department name without 論文
+    d.journal = "國立某大學化學研究所"
+    with pytest.raises(AiritiError, match="學位論文"):
+        apa7(d)
 
 
 def test_cite_export_parsing():

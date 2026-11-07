@@ -20,3 +20,9 @@ def test_hint_text():
     assert "只找到 3 筆" in h and "「啓發 幼兒園」" in h and "「幼兒園」" in h and "AND" in h
     assert "沒有統一" not in few_results_hint("客語沉浸式 幼兒園", 3)
     assert FEW_RESULTS == 5
+
+
+def test_variant_suggestions_are_capped():
+    from airiti_mcp.hints import MAX_SUGGESTIONS
+
+    assert len(variant_queries("啟線楣裡衛污")) == MAX_SUGGESTIONS == 3  # six variant characters, three suggestions

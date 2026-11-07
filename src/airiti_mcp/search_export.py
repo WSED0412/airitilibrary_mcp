@@ -65,19 +65,24 @@ def duplicate_groups(items: list[SearchItem]) -> dict[str, str]:
     return out
 
 
-def make_export_folder(label: str, when: datetime) -> Path:
-    """A fresh folder under the export root for a one-shot export (never reuses or overwrites one)."""
+def make_unique_folder(name: str) -> Path:
+    """Create `name` under the export root; if it exists (two runs in the same second) add _2, _3 ... Never reuses
+    or overwrites an existing folder."""
     root = export_root()
     root.mkdir(parents=True, exist_ok=True)
-    base = f"{when:%Y%m%d_%H%M%S}_{label}"
     for i in range(1, 100):
-        folder = root / (base if i == 1 else f"{base}_{i}")
+        folder = root / (name if i == 1 else f"{name}_{i}")
         try:
             folder.mkdir()
             return folder
         except FileExistsError:
             continue
-    raise OSError(f"cannot create a fresh export folder under {root}")
+    raise OSError(f"cannot create a fresh folder for {name} under {root}")
+
+
+def make_export_folder(label: str, when: datetime) -> Path:
+    """A fresh folder for a one-shot export (airiti_export_citation save=True)."""
+    return make_unique_folder(f"{when:%Y%m%d_%H%M%S}_{label}")
 
 
 def build_csv(items: list[SearchItem]) -> str:

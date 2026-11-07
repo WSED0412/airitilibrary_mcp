@@ -29,6 +29,7 @@ MAX_ERROR_STREAK = 3  # consecutive failed attempts at the same step before the 
 REPAIR_TRIES = 3  # re-fetches of one page boundary before we stop trying to recover a lost record
 PAGE_RETRY_WAITS = (3.0, 6.0)  # seconds to wait before the 2nd and 3rd try of a page that came back empty or broken
 STATE_FILE = "state.json"
+DONE_MESSAGE = "完成"  # the one progress message allowed to reach the total
 STATE_VERSION = 1  # bump when a field is removed or renamed (new fields with defaults need no bump)
 _CRLF2 = "\r\n\r\n"
 
@@ -282,7 +283,6 @@ async def _repair_boundaries(st: RunState, folder: Path, deadline: float) -> boo
                     _healthy(st)
                     save_state(st, folder)
                     return True
-                _healthy(st)
                 known = {d["doc_id"] for d in st.items}
                 fresh[pg] = {i.doc_id for i in res.items}
                 for slot, it in enumerate(res.items, 1):
@@ -292,6 +292,7 @@ async def _repair_boundaries(st: RunState, folder: Path, deadline: float) -> boo
                         st.row_slot.append(slot)  # remembered so the record sorts back to where it ranks
                         st.repaired_records += 1
                         known.add(it.doc_id)
+            _healthy(st)  # a whole round - both pages - went through
             st.repair_tries[str(k)] = st.repair_tries.get(str(k), 0) + 1
             if len(fresh) == 2 and not (fresh[k] & fresh[k + 1]):
                 st.fixed_boundaries.append(k)
@@ -314,6 +315,7 @@ async def _harvest(st: RunState, folder: Path, deadline: float, progress: Progre
                 save_state(st, folder)
                 return  # paused for a retry on the next call
             st.harvest_error = st.last_error  # gave up: keep what we have; the log says the run is incomplete
+            _healthy(st)  # the export that follows gets its own three strikes
             break
         _healthy(st)
         st.pages_fetched += 1
@@ -406,6 +408,8 @@ async def advance(
     last = [-1.0]
 
     async def progress(done: float, total: float | None, message: str) -> None:
+        if total is not None and message != DONE_MESSAGE:
+            done = min(done, total - 0.5)  # only the final DONE_MESSAGE may reach the total
         if done > last[0]:  # MCP requires progress to increase with every notification
             last[0] = done
             await raw_progress(done, total, message)
@@ -425,7 +429,7 @@ async def advance(
     if done:
         write_final_files(st, folder)
         if not st.gave_up:  # an abandoned run must not look finished in a progress bar
-            await progress(_units_total(st), _units_total(st), "完成")
+            await progress(_units_total(st), _units_total(st), DONE_MESSAGE)
     else:
         write_partial_csv(st, folder)
     return done
