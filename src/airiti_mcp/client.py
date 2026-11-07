@@ -54,7 +54,7 @@ def detail_url(doc_id: str) -> str:
 
 
 def build_query_string(query: str, page: int, page_size: int) -> str:
-    """JSON shape verified in recon. Key spellings (SearchFileds / SearchFiledList)
+    """JSON shape verified against the live site (2026-11). Key spellings (SearchFileds / SearchFiledList)
     are the site's own and must not be 'fixed'. FieldName 49 = all fields incl. full text
     (DSF); BSF is the whitespace-split keyword list and is required for results."""
     words = query.split()

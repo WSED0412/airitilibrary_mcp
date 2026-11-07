@@ -1,6 +1,6 @@
 """HTML parsers for the search-result page and the article detail page.
 
-Parsing is structural (CSS classes / meta tags verified in recon) with heading-text
+Parsing is structural (CSS classes / meta tags verified against live pages) with heading-text
 fallbacks for the abstract blocks (zh: 摘要/關鍵字/並列摘要/並列關鍵字, en: Abstracts/
 Keywords/Parallel abstracts/Parallel keywords). DocIDs are never matched against a
 fixed format: they are lifted from the result item's own onclick/attribute.
