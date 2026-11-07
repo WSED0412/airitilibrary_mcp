@@ -27,22 +27,33 @@ def fake_site(monkeypatch, tmp_path):
     last item of each page at the start of the next (the site can shift results between requests)."""
     monkeypatch.setenv("AIRITI_EXPORT_DIR", str(tmp_path))
     state = {"total": 45, "fail_page": None, "overlap": False, "bad_id": None, "export_calls": [],
-             "step": 0.0, "export_step": 0.0, "pages": []}
+             "step": 0.0, "export_step": 0.0, "pages": [], "empty": {}, "sleeps": []}
     clock = {"t": 0.0}  # fake time for the pause/resume tests: each request advances it by step / export_step
     monkeypatch.setattr(harvest, "_now", lambda: clock["t"])
+
+    async def fake_sleep(seconds):  # retry back-off: no real waiting, but the fake clock moves
+        state["sleeps"].append(seconds)
+        clock["t"] += seconds
+
+    monkeypatch.setattr(harvest, "_sleep", fake_sleep)
 
     async def fetch(query, page, page_size):
         state["pages"].append(page)
         clock["t"] += state["step"]
         if state["fail_page"] == page:
             raise AiritiNetworkError("boom")
+        if state["empty"].get(page, 0) > 0:  # the site's flaky "0 筆" answer for a valid page
+            state["empty"][page] -= 1
+            return "E"
         return str(page)
 
     def parse(html):
-        if state["total"] == 0:
+        if state["total"] == 0 or html == "E":
             return SearchPage(total=0)
         page = int(html)
         start = (page - 1) * 20 - (1 if state["overlap"] and page > 1 else 0)
+        if start >= state["total"]:  # out of range: the site gives the same "0 筆" block
+            return SearchPage(total=0)
         end = min(page * 20, state["total"])
         return SearchPage(total=state["total"], items=[_item(n, "學位論文" if n % 10 == 3 else "期刊") for n in range(start, end)])
 
@@ -108,7 +119,7 @@ async def test_persistent_failure_pauses_twice_then_gives_up_keeping_partial_res
     third = await server.airiti_search_all(resume=d.name)  # third strike: give up, keep what we have
     log = (d / "search_log.txt").read_text(encoding="utf-8")
     assert "【不完整】" in third and "連續失敗 3 次後放棄" in log and len(_rows(d)) == 1 + 20
-    assert state["pages"] == [1, 2, 2, 2]  # the same page was retried, not skipped
+    assert state["pages"] == [1] + [2] * 9  # the same page, 3 tries per call over 3 calls - never skipped
 
 
 async def test_search_all_dedupes_repeated_doc_ids(fake_site):
@@ -726,3 +737,145 @@ async def test_log_has_no_url_note_when_nothing_was_exported(fake_site, monkeypa
     await server.airiti_search_all("x", export_format="ris")
     log = (_only_run_dir(root) / "search_log.txt").read_text(encoding="utf-8")
     assert "未產生檔案" in log and "已補成完整網址" not in log
+
+
+async def test_empty_page_in_the_middle_is_retried_in_the_same_call(fake_site):
+    state, root = fake_site
+    state["empty"] = {2: 1}  # the site says "0 筆" for page 2 once, then behaves
+    out = await server.airiti_search_all("x")
+    d = _only_run_dir(root)
+    assert len(_rows(d)) == 1 + 45 and "已暫停" not in out and "因錯誤暫停" not in out
+    assert state["pages"] == [1, 2, 2, 3] and state["sleeps"] == [3.0]  # retried after a 3 s back-off, then moved on
+    log = (d / "search_log.txt").read_text(encoding="utf-8")
+    assert "頁面重試：1 次" in log and "不完整" not in log and "完整性核對：預期 45 筆，取得不重複 45 筆 → 完整" in log
+
+
+async def test_persistent_empty_page_pauses_and_resumes_instead_of_ending_the_run(fake_site):
+    state, root = fake_site
+    state["empty"] = {2: 99}
+    first = await server.airiti_search_all("x")
+    d = _only_run_dir(root)
+    assert "因錯誤暫停" in first and "多半是暫時性的空頁" in first and not (d / "search_log.txt").exists()
+    assert state["sleeps"] == [3.0, 6.0]
+    state["empty"] = {}  # the site recovers
+    second = await server.airiti_search_all(resume=d.name)
+    assert "因錯誤暫停" not in second and len(_rows(d)) == 1 + 45  # pages 2 and 3 were NOT lost
+    assert state["pages"].count(1) == 1  # page 1 is never fetched again
+    assert "不完整" not in (d / "search_log.txt").read_text(encoding="utf-8")
+
+
+async def test_a_budget_too_short_for_the_retries_pauses_without_blaming_the_site(fake_site):
+    state, root = fake_site
+    state["step"] = 4.0
+    state["empty"] = {2: 99}
+    out = await server.airiti_search_all("x", time_budget_s=10)
+    d = _only_run_dir(root)
+    assert "已暫停" in out and "因錯誤暫停" not in out and harvest.load_state(d).error_streak == 0
+    assert state["sleeps"] == []  # no room for the 3 s wait before the deadline
+
+
+async def test_a_flaky_empty_first_page_is_verified_before_saying_no_results(fake_site):
+    state, root = fake_site
+    state["empty"] = {1: 1}
+    out = await server.airiti_search_all("x")
+    assert "共 45 筆" in out and state["pages"][:2] == [1, 1]
+    # genuinely nothing: asked three times, then believed
+    state["total"] = 0
+    state["pages"].clear()
+    out2 = await server.airiti_search_all("沒有這個詞")
+    assert "0 筆" in out2 and "已重試 2 次" in out2 and state["pages"] == [1, 1, 1]
+
+
+async def test_single_page_search_verifies_a_zero_before_reporting_no_results(fake_site):
+    state, root = fake_site
+    state["empty"] = {1: 1}
+    ok = await server.airiti_search("x", 1, 10)
+    assert "共 45 筆" in ok and state["pages"] == [1, 1]
+    state["pages"].clear()
+    state["empty"] = {1: 99}
+    zero = await server.airiti_search("x", 1, 10)
+    assert "已重試 2 次仍是 0 筆" in zero and state["pages"] == [1, 1, 1]
+    state["pages"].clear()
+    beyond = await server.airiti_search("x", 9, 10)  # a genuinely out-of-range page: one retry only
+    assert "頁碼超出總頁數" in beyond and "已重試 1 次" in beyond and state["pages"] == [9, 9]
+
+
+async def test_completeness_check_reports_a_record_lost_at_a_page_boundary(fake_site, monkeypatch):
+    state, root = fake_site
+    pages = {  # a tie swapped across the boundary between two requests: 19 shows up twice, 20 never
+        "1": SearchPage(total=45, items=[_item(n) for n in range(0, 20)]),
+        "2": SearchPage(total=45, items=[_item(19)] + [_item(n) for n in range(21, 40)]),
+        "3": SearchPage(total=45, items=[_item(n) for n in range(40, 45)]),
+    }
+    monkeypatch.setattr(server.parsers, "parse_search", lambda html: pages[html])
+    out = await server.airiti_search_all("x")
+    d = _only_run_dir(root)
+    log = (d / "search_log.txt").read_text(encoding="utf-8")
+    assert "移除 1 筆，剩 44 筆" in log and "預期 45 筆，取得不重複 44 筆 → 缺 1 筆" in log and "同分" not in log.split("缺 1 筆")[0]
+    assert "【完整性】預期 45 筆，只取得 44 筆（缺 1 筆）" in out
+
+
+def _tied_boundary_site(monkeypatch, tails, heads):
+    """45 records, 20 per page. Records 19 and 20 are tied in rank and straddle the page 1|2 boundary; the site
+    orders them anew on every request: request n of page 1 ends with tails[n], request n of page 2 starts with heads[n]."""
+    calls = {"1": 0, "2": 0}
+
+    def parse(html):
+        n = calls.get(html, 0)
+        calls[html] = n + 1
+        if html == "1":
+            tail = tails[min(n, len(tails) - 1)]
+            return SearchPage(total=45, items=[_item(i) for i in range(0, 19)] + [_item(tail)])
+        if html == "2":
+            head = heads[min(n, len(heads) - 1)]
+            return SearchPage(total=45, items=[_item(head)] + [_item(i) for i in range(21, 40)])
+        return SearchPage(total=45, items=[_item(i) for i in range(40, 45)])
+
+    monkeypatch.setattr(server.parsers, "parse_search", parse)
+
+
+async def test_tied_records_lost_at_a_page_boundary_are_recovered_by_refetching(fake_site, monkeypatch):
+    state, root = fake_site
+    # harvest: 19 shows at the end of page 1 AND the start of page 2, 20 nowhere. Round 1 repeats the mistake,
+    # round 2 gets a consistent pair (page 1 ends with 20, page 2 starts with 19) which contains the lost record.
+    _tied_boundary_site(monkeypatch, tails=[19, 19, 20], heads=[19, 19, 19])
+    out = await server.airiti_search_all("x")
+    d = _only_run_dir(root)
+    ids = [r[1] for r in _rows(d)[1:]]
+    assert len(ids) == 45 == len(set(ids)) and "DOC20" in ids and ids.index("DOC20") < ids.index("DOC21")
+    assert state["pages"] == [1, 2, 3, 1, 2, 1, 2]  # only the two pages around the boundary were asked again, twice
+    log = (d / "search_log.txt").read_text(encoding="utf-8")
+    assert "邊界修補：1 處頁邊界出現重複" in log and "補回 1 筆" in log and "預期 45 筆，取得不重複 45 筆 → 完整" in log
+    assert "本次實際取得：46 筆" in log and "去除重複 DocID：移除 1 筆，剩 45 筆" in log  # 45 page rows + 1 recovered; the boundary repeat is dropped
+    assert "【完整性】" not in out and "邊界修補" in out
+
+
+async def test_boundary_repair_gives_up_after_three_rounds_and_still_reports_the_loss(fake_site, monkeypatch):
+    state, root = fake_site
+    _tied_boundary_site(monkeypatch, tails=[19], heads=[19])  # the site never gets it right
+    out = await server.airiti_search_all("x")
+    d = _only_run_dir(root)
+    assert len(_rows(d)) == 1 + 44 and state["pages"] == [1, 2, 3] + [1, 2] * 3  # bounded: 3 rounds, no more
+    log = (d / "search_log.txt").read_text(encoding="utf-8")
+    assert "缺 1 筆" in log and "1 處在 3 輪內沒有得到一致的結果，可能仍缺記錄" in log and "【完整性】" in out
+
+
+async def test_a_clean_harvest_makes_no_repair_requests(fake_site):
+    state, root = fake_site
+    await server.airiti_search_all("x")
+    assert state["pages"] == [1, 2, 3]
+    assert "邊界修補" not in (_only_run_dir(root) / "search_log.txt").read_text(encoding="utf-8")
+
+
+async def test_repair_survives_a_pause_and_resume(fake_site, monkeypatch):
+    state, root = fake_site
+    _tied_boundary_site(monkeypatch, tails=[19, 20], heads=[19, 19])
+    state["step"] = 6.0  # every request "takes" 6 s; budget 10 s
+    first = await server.airiti_search_all("x", time_budget_s=10)
+    d = _only_run_dir(root)
+    for _ in range(30):
+        if "已暫停" not in first:
+            break
+        first = await server.airiti_search_all(resume=d.name, time_budget_s=10)
+    ids = [r[1] for r in _rows(d)[1:]]
+    assert len(ids) == 45 == len(set(ids)) and "DOC20" in ids

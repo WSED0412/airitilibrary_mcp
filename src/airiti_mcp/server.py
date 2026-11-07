@@ -69,20 +69,24 @@ async def airiti_search(query: str, page: int = 1, max_results: int = 10) -> str
     if not 1 <= max_results <= MAX_PAGE_SIZE:
         raise AiritiError(f"max_results 必須介於 1 到 {MAX_PAGE_SIZE}。")
 
-    html = await client.fetch_search_html(query, page, max_results)
-    result = parsers.parse_search(html)
+    # The site sometimes answers a valid page with the same "0 筆" block a truly empty query gets, so an empty
+    # answer is asked again before it is believed (page 1: twice; later pages may simply be out of range: once).
+    waits = harvest.PAGE_RETRY_WAITS if page == 1 else harvest.PAGE_RETRY_WAITS[:1]
+    result, err, retries, _ = await harvest.fetch_search_page(query, page, max_results, waits=waits)
+    if result is None:
+        raise err  # type: ignore[misc]  # every try raised
 
     if result.total == 0 and page > 1:
         # The site answers an out-of-range page with the same "0 筆" block as a truly empty
         # query, so on page > 1 we cannot tell the two apart without another request.
         return (
-            f"查詢「{query}」第 {page} 頁（每頁 {max_results} 筆）：華藝回報 0 筆。"
+            f"查詢「{query}」第 {page} 頁（每頁 {max_results} 筆）：華藝回報 0 筆（已重試 {retries} 次）。"
             "這通常是頁碼超出總頁數，**不代表整個查詢沒有結果**；"
-            "請改查 page=1 取得總筆數與總頁數。"
+            "請改查 page=1 取得總筆數與總頁數。華藝偶爾也會對有效頁碼暫時回 0 筆，確定頁碼在範圍內的話可稍後再試。"
         )
     if result.total == 0:
         return (
-            f"查詢「{query}」：華藝回報 0 筆結果（連線與解析皆正常，確實沒有符合的文獻）。\n"
+            f"查詢「{query}」：華藝回報 0 筆結果（已重試 {retries} 次仍是 0 筆，應該是真的沒有符合的文獻）。\n"
             + hints.few_results_hint(query, 0)
         )
     if not result.items:  # unreachable (parser raises), kept as a guard

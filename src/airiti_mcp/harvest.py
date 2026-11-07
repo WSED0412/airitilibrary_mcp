@@ -26,11 +26,14 @@ from .errors import AiritiError
 PAGE_SIZE = 20
 MAX_EXPORT = 20  # tested live with 13 at once; kept modest so one batch stays fast
 MAX_ERROR_STREAK = 3  # consecutive failed attempts at the same step before the run gives up
+REPAIR_TRIES = 3  # re-fetches of one page boundary before we stop trying to recover a lost record
+PAGE_RETRY_WAITS = (3.0, 6.0)  # seconds to wait before the 2nd and 3rd try of a page that came back empty or broken
 STATE_FILE = "state.json"
 STATE_VERSION = 1  # bump when a field is removed or renamed (new fields with defaults need no bump)
 _CRLF2 = "\r\n\r\n"
 
 _now = time.monotonic  # tests replace this with a fake clock
+_sleep = asyncio.sleep  # ... and this with a no-op that advances the fake clock
 _locks: dict[str, asyncio.Lock] = {}
 
 ProgressFn = Callable[[float, float | None, str], Awaitable[None]]
@@ -101,6 +104,12 @@ class RunState:
     finished: bool = False
     export_bytes: int = -1  # size of the export file after the last saved batch; -1 = unknown (older state files)
     version: int = STATE_VERSION
+    expected: int = 0  # how many records a complete harvest should hold: min(reported total, cap)
+    page_retries: int = 0  # result pages that had to be requested again (empty or broken answers)
+    row_page: list[int] = field(default_factory=list)  # page number of every raw row in `items` (while harvesting)
+    repair_tries: dict[str, int] = field(default_factory=dict)  # page boundary k (pages k|k+1) -> re-fetch rounds made
+    fixed_boundaries: list[int] = field(default_factory=list)  # boundaries confirmed consistent by a fresh fetch
+    repaired_records: int = 0  # records recovered by re-fetching boundaries
 
     def search_items(self) -> list[parsers.SearchItem]:
         return [parsers.SearchItem(**d) for d in self.items]
@@ -149,18 +158,50 @@ def resolve_run_folder(resume: str) -> Path:
     return folder
 
 
+async def fetch_search_page(
+    query: str, page: int, page_size: int, *, waits: tuple[float, ...] = PAGE_RETRY_WAITS, deadline: float | None = None
+) -> tuple[parsers.SearchPage | None, AiritiError | None, int, bool]:
+    """One result page, asked again when it comes back empty or broken.
+
+    Airiti sometimes answers a VALID page with the same "0 筆" block a truly empty query gets (measured about
+    2% of page requests, clustered in time), so an empty answer is not believed until it repeats.
+    Returns (page or None, last error or None, retries made, exhausted). `exhausted` is False when the
+    deadline left no time for the remaining retries - the caller should pause, not blame the site."""
+    res: parsers.SearchPage | None = None
+    err: AiritiError | None = None
+    used = 0
+    for attempt in range(len(waits) + 1):
+        if attempt:
+            wait = waits[attempt - 1]
+            if deadline is not None and _now() + wait >= deadline:
+                return res, err, used, False
+            await _sleep(wait)
+            used += 1
+        try:
+            res, err = parsers.parse_search(await client.fetch_search_html(query, page, page_size)), None
+        except AiritiError as e:
+            res, err = None, e
+            continue
+        if res.items:
+            return res, None, used, True
+    return res, err, used, True
+
+
 async def start_run(query: str, max_total: int, export_key: str) -> tuple[RunState | None, str]:
-    """Fetch page 1. Returns (state, "") or (None, hint-text) when the site reports 0 results."""
+    """Fetch page 1. Returns (state, "") or (None, hint-text) when the site keeps reporting 0 results."""
     from . import hints
 
-    first = parsers.parse_search(await client.fetch_search_html(query, 1, PAGE_SIZE))
+    first, err, used, _ = await fetch_search_page(query, 1, PAGE_SIZE)
+    if first is None:
+        raise err  # type: ignore[misc]  # res is None only when every try raised
     if first.total == 0:
-        return None, hints.few_results_hint(query, 0)
+        return None, f"已重試 {used} 次，華藝仍回報 0 筆（華藝偶爾會對有效的查詢暫時回 0 筆，所以才重試）。\n" + hints.few_results_hint(query, 0)
     st = RunState(
         query=query, max_total=max_total, export_key=export_key,
         started=datetime.now().astimezone().isoformat(timespec="seconds"),
         total=first.total, pages_needed=-(-min(first.total, max_total) // PAGE_SIZE),
-        pages_fetched=1, fetched=len(first.items), items=[asdict(i) for i in first.items],
+        pages_fetched=1, fetched=len(first.items), items=[asdict(i) for i in first.items], page_retries=used,
+        row_page=[1] * len(first.items),
     )
     return st, ""
 
@@ -182,33 +223,88 @@ def _healthy(st: RunState) -> None:
     st.last_error = ""
 
 
+def _overlapping_boundaries(st: RunState) -> list[int]:
+    """Pages k where page k and page k+1 both hold the same DocID."""
+    pages: dict[int, set[str]] = {}
+    for d, pg in zip(st.items, st.row_page):
+        pages.setdefault(pg, set()).add(d["doc_id"])
+    return [k for k in sorted(pages) if k + 1 in pages and pages[k] & pages[k + 1]]
+
+
+async def _repair_boundaries(st: RunState, folder: Path, deadline: float) -> bool:
+    """Recover records lost to Airiti's unstable tie order. Records with equal rank come back in a random order
+    on EVERY request, and each page is its own request, so a tie group straddling a page boundary can show the
+    same record at the end of page k and the start of page k+1 and leave its twin out entirely (seen live:
+    282 rows, 281 distinct, 1 missing). A repeated DocID across a boundary therefore always means a lost one.
+    Fix: ask for the two pages again; a fresh pair that shares nothing contains the whole tie group, and any
+    record we did not have is added. Best effort, REPAIR_TRIES rounds per boundary. Returns False if paused."""
+    if len(st.row_page) != len(st.items):  # state from before row_page existed: cannot tell which page a row came from
+        return True
+    for k in _overlapping_boundaries(st):
+        while st.repair_tries.get(str(k), 0) < REPAIR_TRIES and k not in st.fixed_boundaries:
+            if _now() >= deadline:
+                return False
+            fresh: dict[int, set[str]] = {}
+            for pg in (k, k + 1):
+                res, _err, used, exhausted = await fetch_search_page(st.query, pg, PAGE_SIZE, deadline=deadline)
+                st.page_retries += used
+                if res is None or not res.items:
+                    if not exhausted:
+                        return False  # out of time, not out of luck: do not count this round
+                    break  # the site would not answer: this round is lost, try again next round
+                known = {d["doc_id"] for d in st.items}
+                fresh[pg] = {i.doc_id for i in res.items}
+                for it in res.items:
+                    if it.doc_id not in known:
+                        st.items.append(asdict(it))
+                        st.row_page.append(pg)
+                        st.repaired_records += 1
+                        st.fetched += 1  # a row we now hold, so the dedupe line adds up
+            st.repair_tries[str(k)] = st.repair_tries.get(str(k), 0) + 1
+            if len(fresh) == 2 and not (fresh[k] & fresh[k + 1]):
+                st.fixed_boundaries.append(k)
+            save_state(st, folder)
+    return True
+
+
 async def _harvest(st: RunState, folder: Path, deadline: float, progress: ProgressFn) -> None:
     while st.next_page <= st.pages_needed:
         if _now() >= deadline:
             return  # paused: harvest_done stays False
         page = st.next_page
-        try:
-            res = parsers.parse_search(await client.fetch_search_html(st.query, page, PAGE_SIZE))
-        except AiritiError as e:
-            if not _record_error(st, f"第 {page} 頁", e):
+        res, err, used, exhausted = await fetch_search_page(st.query, page, PAGE_SIZE, deadline=deadline)
+        st.page_retries += used
+        if res is None or not res.items:
+            if not exhausted:  # no time left for the retries: pause without blaming the site
+                save_state(st, folder)
+                return
+            failure = err or AiritiError(
+                f"華藝對第 {page} 頁回報 0 筆（頁碼在 1–{st.pages_needed} 之內，多半是暫時性的空頁；已重試 {used} 次）"
+            )
+            if not _record_error(st, f"第 {page} 頁", failure):
                 save_state(st, folder)
                 return  # paused for a retry on the next call
             st.harvest_error = st.last_error  # gave up: keep what we have; the log says the run is incomplete
-            break
-        if not res.items:  # not a transient condition: stop here
-            st.harvest_error = f"第 {page} 頁沒有項目（華藝回報 {res.total} 筆），提前停止。"
             break
         _healthy(st)
         st.pages_fetched += 1
         st.fetched += len(res.items)
         st.items += [asdict(i) for i in res.items]
+        st.row_page += [page] * len(res.items)
         st.next_page += 1
         save_state(st, folder)
         await progress(st.pages_fetched, _units_total(st), f"已抓 {st.pages_fetched}/{st.pages_needed} 頁")
+    if not st.harvest_error and not await _repair_boundaries(st, folder, deadline):
+        return  # paused while repairing; resume continues from the saved tries
+    if len(st.row_page) == len(st.items):  # recovered records were appended: put them back on their page
+        order = sorted(range(len(st.items)), key=lambda i: st.row_page[i])  # stable: keeps the site's order per page
+        st.items = [st.items[i] for i in order]
+    st.row_page = []
     # harvest over (all pages, or gave up): de-duplicate and apply the cap
     seen: set[str] = set()
     deduped = [d for d in st.items if not (d["doc_id"] in seen or seen.add(d["doc_id"]))]
     st.deduped = len(deduped)
+    st.expected = min(st.total, st.max_total)
     st.items = deduped[: st.max_total]
     items = st.search_items()
     st.ids = [it.doc_id for it in items if not is_thesis(it)]
@@ -338,6 +434,19 @@ def export_lines(st: RunState) -> list[str]:
     return lines
 
 
+def repair_lines(st: RunState) -> list[str]:
+    if not st.repair_tries:
+        return []
+    unconfirmed = len(st.repair_tries) - len(st.fixed_boundaries)
+    line = (
+        f"邊界修補：{len(st.repair_tries)} 處頁邊界出現重複（排名相同的記錄在兩次請求間順序互換），"
+        f"重抓相鄰兩頁後補回 {st.repaired_records} 筆"
+    )
+    if unconfirmed:
+        line += f"；{unconfirmed} 處在 {REPAIR_TRIES} 輪內沒有得到一致的結果，可能仍缺記錄"
+    return [line]
+
+
 def write_final_files(st: RunState, folder: Path) -> None:
     items = st.search_items()
     _write_csv(items, folder)
@@ -349,6 +458,7 @@ def write_final_files(st: RunState, folder: Path) -> None:
             query=st.query, when=when, reported_total=st.total, fetched=st.fetched, deduped=st.deduped,
             unique=len(items), pages_fetched=st.pages_fetched, page_size=PAGE_SIZE, cap=st.max_total,
             items=items, error=harvest_error, export_lines=export_lines(st), run_note=note,
+            expected=st.expected, page_retries=st.page_retries, notes=repair_lines(st),
         ),
         encoding="utf-8",
     )
@@ -393,6 +503,10 @@ def summary(st: RunState, folder: Path, budget_s: float | None = None) -> str:
                 f"【截斷】總筆數 {st.total} 超過 max_total={st.max_total}；"
                 "建議加關鍵字縮小範圍，或調高 max_total。"
             )
+        out += repair_lines(st)
+        missing = max(0, st.expected - st.deduped)
+        if missing and not st.harvest_error:
+            out.append(f"【完整性】預期 {st.expected} 筆，只取得 {st.deduped} 筆（缺 {missing} 筆）；原因見檢索紀錄。")
         dups = search_export.duplicate_groups(st.search_items())
         if dups:
             out.append(f"疑似重複 {len(set(dups.values()))} 組、涉及 {len(dups)} 筆（篇名與作者相同、DocID 不同；未移除，見 results.csv「疑似重複組」欄與檢索紀錄）。")

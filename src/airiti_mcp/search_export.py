@@ -97,6 +97,7 @@ def build_log(
     *, query: str, when: datetime, reported_total: int, fetched: int, unique: int,
     pages_fetched: int, page_size: int, cap: int, items: list[SearchItem], error: str = "",
     export_lines: list[str] | None = None, deduped: int | None = None, run_note: str = "",
+    expected: int | None = None, page_retries: int = 0, notes: list[str] | None = None,
 ) -> str:
     deduped = unique if deduped is None else deduped
     truncated = reported_total > cap
@@ -123,6 +124,25 @@ def build_log(
         "取得筆數上限：" + f"{cap}" + ("（總筆數超過上限，結果被截斷，不是完整結果）" if truncated else "（未觸及上限）"),
         "類型分布：" + "；".join(f"{k} {n}" for k, n in kinds.most_common()),
     ]
+    extra: list[str] = []
+    if expected is not None:
+        missing = max(0, expected - deduped)
+        line = f"完整性核對：預期 {expected} 筆，取得不重複 {deduped} 筆"
+        if not missing:
+            line += " → 完整"
+        elif error:
+            line += f" → 缺 {missing} 筆（抓取中途放棄，見下方【不完整】）"
+        else:
+            line += (
+                f" → 缺 {missing} 筆。可能原因：頁邊界上排名相同的記錄在兩次請求之間互換位置，造成一筆重複、一筆漏抓；"
+                "建議縮小查詢範圍，或再跑一次互相比對。"
+            )
+        extra.append(line)
+    if page_retries:
+        extra.append(f"頁面重試：{page_retries} 次（華藝偶爾對有效頁碼暫時回 0 筆或出錯，已自動重試補回）")
+    extra += notes or []
+    at = next(i for i, l in enumerate(lines) if l.startswith("納入清單"))
+    lines[at + 1 : at + 1] = extra
     if run_note:
         lines.append(run_note)
     if export_lines:
