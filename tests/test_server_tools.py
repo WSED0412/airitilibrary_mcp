@@ -78,3 +78,65 @@ def test_the_entry_point_runs_the_stdio_transport(monkeypatch):
     monkeypatch.setattr(stdio.mcp, "run", lambda transport: seen.append(transport))
     stdio.main()
     assert seen == ["stdio"]
+
+
+async def test_over_a_real_mcp_session_ctx_is_hidden_and_progress_arrives(fake_site):
+    from mcp.client import Client
+
+    state, root = fake_site
+    events = []
+
+    async def on_progress(progress, total, message):
+        events.append((progress, total, message))
+
+    async with Client(server.mcp) as c:
+        tool = next(t for t in (await c.list_tools()).tools if t.name == "airiti_search_all")
+        props = tool.input_schema["properties"] if hasattr(tool, "input_schema") else tool.inputSchema["properties"]
+        assert "ctx" not in props and {"resume", "time_budget_s", "export_format"} <= set(props)
+        result = await c.call_tool("airiti_search_all", {"query": "x", "export_format": "ris"}, progress_callback=on_progress)
+    assert "共 45 筆" in str(result)
+    values = [e[0] for e in events]
+    assert values and values == sorted(values) and len(set(values)) == len(values)
+    assert events[-1][0] == events[-1][1] == 6 and any("已抓" in e[2] for e in events)
+
+
+async def test_single_page_search_verifies_a_zero_before_reporting_no_results(fake_site):
+    state, root = fake_site
+    state["empty"] = {1: 1}
+    ok = await server.airiti_search("x", 1, 10)
+    assert "共 45 筆" in ok and "本頁 10 筆" in ok and state["pages"] == [1, 1]  # 10 per page, as asked
+    state["pages"].clear()
+    state["empty"] = {1: 99}
+    zero = await server.airiti_search("x", 1, 10)
+    assert "已重試 2 次仍是 0 筆" in zero and state["pages"] == [1, 1, 1]
+    state["pages"].clear()
+    beyond = await server.airiti_search("x", 9, 10)  # a genuinely out-of-range page: one retry only
+    assert "頁碼超出總頁數" in beyond and "已重試 1 次" in beyond and state["pages"] == [9, 9]
+
+
+async def test_every_tool_is_named_in_the_server_instructions():
+    names = [t.name for t in await server.mcp.list_tools()]
+    assert {"airiti_search", "airiti_abstract", "airiti_cite_apa", "airiti_search_all", "airiti_export_citation"} <= set(names)
+    text = server.mcp.instructions
+    for name in names:
+        assert name in text, name  # a new tool that the instructions forget to mention fails here
+    assert "resume" in text and "save=True" in text
+
+
+async def test_a_disk_error_reaches_the_model_with_its_reason(fake_site, monkeypatch):
+    from pathlib import Path
+
+    from mcp.client import Client
+
+    state, root = fake_site
+    real_open = Path.open
+
+    def full_disk(self, mode="r", *a, **k):
+        if "w" in mode and self.name == "export.ris":
+            raise OSError(28, "No space left on device")
+        return real_open(self, mode, *a, **k)
+
+    monkeypatch.setattr(Path, "open", full_disk)
+    async with Client(server.mcp) as c:
+        res = await c.call_tool("airiti_export_citation", {"doc_ids": ["DOC1"], "format": "ris", "save": True})
+    assert "No space left on device" in str(res) and "AIRITI_EXPORT_DIR" in str(res)  # not just "Error executing tool"
