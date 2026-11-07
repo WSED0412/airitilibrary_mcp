@@ -77,3 +77,11 @@ async def test_unknown_or_truncated_thesis_docid_gives_a_clear_error():
 async def test_open_access_on_detail_page():
     out = await server.airiti_abstract("1027507x-201212-201301160049-201301160049-563-586")
     assert "開放取用：是" in out
+
+
+async def test_volume_less_journal_gets_the_real_issue_number():
+    # the detail page of this article says issue 42; Airiti's own export (and its DocID) say 642
+    out = await server.airiti_abstract("18166482-200612-x-642-53-57-a")
+    assert "642" in out and "已採用匯出資料" in out
+    ref = await server.airiti_cite_apa("18166482-200612-x-642-53-57-a")
+    assert "*台灣教育*，642，53–57" in ref

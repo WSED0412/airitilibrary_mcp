@@ -203,11 +203,35 @@ async def fetch_detail(
             await _sleep(waits[attempt - 1])
         html = await client.fetch_detail_html(doc_id)
         try:
-            return parsers.parse_detail(html, doc_id, with_references, with_cited_by)
+            det = parsers.parse_detail(html, doc_id, with_references, with_cited_by)
         except AiritiShellPageError as e:
             if attempt == len(waits):
                 raise AiritiShellPageError(f"{e}（已重試 {len(waits)} 次，仍是首頁殼）") from e
+            continue
+        if not det.volume:
+            await _correct_issue(det)
+        return det
     raise AssertionError("unreachable")  # the loop above always returns or raises
+
+
+async def _correct_issue(det: parsers.Detail) -> None:
+    """Without a volume the detail page's `citation_issue` cannot be trusted: on 20 real articles all 9 volume-less
+    records had it damaged (642 -> 42, 28 -> 8, "101年度" -> empty) while Airiti's own RIS export had the right value
+    (the DOI even repeats it, e.g. JETP.201712_(36)). So ask the export; if that is impossible print no issue at all
+    rather than a wrong one. Costs two requests, and only for volume-less records."""
+    page_issue = det.issue
+    try:
+        content, _ = await export_ids([det.doc_id], "RIS")
+    except AiritiError:
+        content = None
+    if content is None:
+        det.issue = ""
+        det.notes.append("此文獻沒有卷號，而華藝頁面上的期號在這種情況下常被截掉前幾位；向匯出資料核對期號又失敗，所以不列期號。")
+        return
+    real = cite_export.ris_issue(content)
+    det.issue = real
+    if real != page_issue:
+        det.notes.append(f"頁面上的期號（{page_issue or '空白'}）和華藝匯出資料（{real or '空白'}）不一致，已採用匯出資料。")
 
 
 async def start_run(query: str, max_total: int, export_key: str) -> tuple[RunState | None, str]:

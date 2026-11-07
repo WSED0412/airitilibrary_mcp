@@ -368,3 +368,103 @@ async def test_only_the_shell_is_retried(monkeypatch, detail_site):
     with pytest.raises(Exception, match="structure changed"):
         await server.airiti_abstract("ID")
     assert len(detail_site["calls"]) == 1 and detail_site["sleeps"] == []  # a redesign is not hammered three times
+
+
+# ---------------- the issue number of journals without a volume: the page lies, the export tells the truth ----------------
+NO_VOLUME = DETAIL.replace("name='citation_volume' content='1'", "name='citation_volume' content=''").replace(
+    "name='citation_issue' content='3'", "name='citation_issue' content='42'"  # the page says 42 ...
+)
+
+
+def ris_with_issue(issue):
+    import json
+
+    body = "TY  - JOUR\r\nT1  - 題目\r\n" + (f"IS  - {issue}\r\n" if issue else "") + "PY  - 2006\r\nER  - \r\n\r\n"
+    return json.dumps({"ReturnValue": 0, "ReturnData": {"ID": "x", "Content": body}})
+
+
+@pytest.fixture
+def export_site(detail_site, monkeypatch):
+    """detail_site (fake detail pages, fake sleep) plus a fake CiteExport that records its calls."""
+    from airiti_mcp import server
+
+    detail_site["export_calls"] = []
+    detail_site["export_body"] = ris_with_issue("642")  # ... the export says 642
+
+    async def fake_export(ids, site_type):
+        detail_site["export_calls"].append((list(ids), site_type))
+        if isinstance(detail_site["export_body"], Exception):
+            raise detail_site["export_body"]
+        return detail_site["export_body"]
+
+    monkeypatch.setattr(server.client, "fetch_cite_export", fake_export)
+    return detail_site
+
+
+def test_ris_issue_reads_the_first_record_only():
+    from airiti_mcp.cite_export import ris_issue
+
+    assert ris_issue("TY  - JOUR\r\nIS  - 642\r\nER  - \r\n") == "642"
+    assert ris_issue("TY  - JOUR\r\nIS  - 101年度 \r\nER  - \r\n") == "101年度"
+    assert ris_issue("TY  - JOUR\r\nT1  - no issue\r\nER  - \r\n\r\nTY  - JOUR\r\nIS  - 9\r\nER  - \r\n") == ""  # 2nd record is not ours
+    assert ris_issue("") == ""
+
+
+async def test_a_volume_less_article_gets_its_issue_from_the_export(export_site):
+    from airiti_mcp import harvest
+
+    export_site["pages"] = [NO_VOLUME]
+    det = await harvest.fetch_detail("18166482-x")
+    assert det.volume == "" and det.issue == "642"  # not the page's 42
+    assert export_site["export_calls"] == [(["18166482-x"], "RIS")]  # one extra export, for this id only
+    assert any("42" in n and "642" in n and "已採用匯出資料" in n for n in det.notes)  # and the user is told
+
+
+async def test_the_corrected_issue_reaches_the_apa_reference(export_site):
+    from airiti_mcp import server
+
+    export_site["pages"] = [NO_VOLUME]
+    ref = await server.airiti_cite_apa("ID")
+    assert "*期刊名*，642，19–57。" in ref and "42，" not in ref.replace("642，", "")
+
+
+async def test_an_article_with_a_volume_costs_no_extra_request(export_site):
+    from airiti_mcp import harvest
+
+    export_site["pages"] = [DETAIL]  # volume 1, issue 3: the page is reliable here
+    det = await harvest.fetch_detail("ID")
+    assert det.volume == "1" and det.issue == "3" and export_site["export_calls"] == []
+
+
+async def test_matching_numbers_produce_no_note(export_site):
+    from airiti_mcp import harvest
+
+    export_site["pages"] = [NO_VOLUME.replace("content='42'", "content='642'")]
+    det = await harvest.fetch_detail("ID")
+    assert det.issue == "642" and not any("不一致" in n for n in det.notes)
+
+
+async def test_a_page_issue_that_the_export_says_does_not_exist_is_dropped(export_site):
+    from airiti_mcp import harvest
+
+    export_site["export_body"] = ris_with_issue("")  # the export has no issue at all
+    export_site["pages"] = [NO_VOLUME]
+    det = await harvest.fetch_detail("ID")
+    assert det.issue == "" and any("空白" in n for n in det.notes)
+
+
+@pytest.mark.parametrize("failure", ["site refuses", "network down"])
+async def test_if_the_export_cannot_be_reached_no_issue_is_printed_rather_than_a_wrong_one(export_site, failure):
+    import json
+
+    from airiti_mcp import harvest, server
+    from airiti_mcp.errors import AiritiNetworkError
+
+    export_site["export_body"] = (
+        json.dumps({"ReturnValue": 1, "ReturnMessage": "處理失敗", "ReturnData": None}) if failure == "site refuses" else AiritiNetworkError("down")
+    )
+    export_site["pages"] = [NO_VOLUME]
+    det = await harvest.fetch_detail("ID")
+    assert det.issue == "" and any("所以不列期號" in n for n in det.notes)
+    ref = await server.airiti_cite_apa("ID")
+    assert "*期刊名*，19–57。" in ref  # journal and pages, but no (possibly wrong) issue number

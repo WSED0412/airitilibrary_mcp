@@ -27,6 +27,16 @@ def absolutize_urls(content: str, base: str) -> str:
     return _RELATIVE_UR.sub(lambda m: m.group(1) + base.rstrip("/") + "/" + m.group(2).lstrip("/"), content)
 
 
+_RIS_ISSUE = re.compile(r"^IS  - ([^\r\n]*)", re.M)
+
+
+def ris_issue(content: str) -> str:
+    """The issue ("IS" line) of the FIRST record of some RIS text; "" when that record has none."""
+    first = content.split("ER  -", 1)[0]
+    m = _RIS_ISSUE.search(first)
+    return m.group(1).strip() if m else ""
+
+
 _TOKEN = re.compile(r"ajaxRequestVerificationToken_CiteWindow\s*=\s*'([^']+)'")
 
 
