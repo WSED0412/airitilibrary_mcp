@@ -140,3 +140,14 @@ async def test_a_disk_error_reaches_the_model_with_its_reason(fake_site, monkeyp
     async with Client(server.mcp) as c:
         res = await c.call_tool("airiti_export_citation", {"doc_ids": ["DOC1"], "format": "ris", "save": True})
     assert "No space left on device" in str(res) and "AIRITI_EXPORT_DIR" in str(res)  # not just "Error executing tool"
+
+
+async def test_abstract_shows_a_one_page_article_with_a_single_page_number(monkeypatch):
+    det = parse_detail(DETAIL.replace("content='57'", "content='19'"), "ID")
+
+    async def fake_detail(*a, **k):
+        return det
+
+    monkeypatch.setattr(server, "_detail", fake_detail)
+    out = await server.airiti_abstract("ID")
+    assert "頁碼：19\n" in out and "19–19" not in out

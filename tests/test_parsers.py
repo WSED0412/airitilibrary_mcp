@@ -524,3 +524,9 @@ def test_airitis_no_abstract_placeholder_is_not_presented_as_an_abstract():
     assert parse_detail(both, "ID").abstract == ""
     # a real truncated meta abstract is still used as before
     assert parse_detail(head_only, "ID").abstract == "被截斷的摘…"
+
+
+def test_parallel_abstract_placeholder_is_not_an_abstract_either():
+    html = DETAIL.replace("<p>Full abstract.</p>", "<p>文章暫無收錄摘要</p>")
+    d = parse_detail(html, "ID")
+    assert d.abstract_parallel == "" and any("沒有並列" in n for n in d.notes)

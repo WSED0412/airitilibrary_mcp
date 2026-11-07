@@ -153,7 +153,7 @@ async def airiti_abstract(doc_id: str, include_references: bool = False, include
     """
     d = await _detail(doc_id, include_references, include_cited_by)
     vol_issue = "".join([f"第{d.volume}卷" if d.volume else "", f"第{d.issue}期" if d.issue else ""])
-    pages = f"{d.first_page}–{d.last_page}" if d.first_page and d.last_page else d.first_page
+    pages = f"{d.first_page}–{d.last_page}" if d.first_page and d.last_page and d.last_page != d.first_page else d.first_page
     rows = [
         ("篇名", d.title),
         ("並列篇名", d.title_parallel),

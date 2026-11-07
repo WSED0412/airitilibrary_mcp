@@ -49,13 +49,15 @@ def apa7(d: Detail) -> str:
     iss = f"（{d.issue}）" if d.issue else ""
     pages = ""
     if d.first_page:
-        pages = f"，{d.first_page}–{d.last_page}" if d.last_page else f"，{d.first_page}"
+        same = not d.last_page or d.last_page == d.first_page  # a one-page piece is "15", not "15–15"
+        pages = f"，{d.first_page}" if same else f"，{d.first_page}–{d.last_page}"
     if vol:
         vol_iss = f"，{vol}{iss}"
     elif d.issue:
         vol_iss = f"，{d.issue}"  # no volume: the bare issue number, plain, no parentheses
     else:
         vol_iss = ""
-    body = f"{d.title}。*{d.journal}*" + vol_iss + pages + "。"
+    title = d.title if d.title.rstrip()[-1:] in "？！。?!." else d.title + "。"  # no "？。" / "。。"
+    body = f"{title}*{d.journal}*" + vol_iss + pages + "。"
     link = f"https://doi.org/{d.doi}" if d.doi else d.url
     return head + body + " " + link  # the space lets Markdown viewers turn the DOI / URL into a link

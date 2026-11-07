@@ -218,6 +218,8 @@ def parse_detail(html: str, doc_id: str, with_references: bool = False, with_cit
 
     if abstract.strip() == NO_ABSTRACT_PLACEHOLDER:  # Airiti's "no abstract on record" text is not an abstract
         abstract = ""
+    if parallel.strip() == NO_ABSTRACT_PLACEHOLDER:
+        parallel = ""
     truncated = False
     if not abstract:
         meta_abs = _meta(tree, "citation_abstract")
