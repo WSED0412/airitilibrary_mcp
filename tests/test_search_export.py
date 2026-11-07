@@ -764,14 +764,20 @@ async def test_persistent_empty_page_pauses_and_resumes_instead_of_ending_the_ru
     assert "不完整" not in (d / "search_log.txt").read_text(encoding="utf-8")
 
 
-async def test_a_budget_too_short_for_the_retries_pauses_without_blaming_the_site(fake_site):
+async def test_a_budget_too_short_for_the_retries_still_counts_a_strike_and_never_pauses_forever(fake_site):
     state, root = fake_site
-    state["step"] = 4.0
-    state["empty"] = {2: 99}
+    state["step"] = 2.0  # slow site + 10 s budget: the 6 s back-off never fits
+    state["empty"] = {2: 10**6}
     out = await server.airiti_search_all("x", time_budget_s=10)
     d = _only_run_dir(root)
-    assert "已暫停" in out and "因錯誤暫停" not in out and harvest.load_state(d).error_streak == 0
-    assert state["sleeps"] == []  # no room for the 3 s wait before the deadline
+    assert "因錯誤暫停" in out and harvest.load_state(d).error_streak == 1
+    for _ in range(6):
+        if harvest.load_state(d).finished:
+            break
+        await server.airiti_search_all(resume=d.name, time_budget_s=10)
+    st = harvest.load_state(d)
+    assert st.finished and st.harvest_error  # three strikes, then it gives up instead of looping forever
+    assert "不完整" in (d / "search_log.txt").read_text(encoding="utf-8") and len(_rows(d)) == 1 + 20
 
 
 async def test_a_flaky_empty_first_page_is_verified_before_saying_no_results(fake_site):
@@ -846,7 +852,8 @@ async def test_tied_records_lost_at_a_page_boundary_are_recovered_by_refetching(
     assert state["pages"] == [1, 2, 3, 1, 2, 1, 2]  # only the two pages around the boundary were asked again, twice
     log = (d / "search_log.txt").read_text(encoding="utf-8")
     assert "邊界修補：1 處頁邊界出現重複" in log and "補回 1 筆" in log and "預期 45 筆，取得不重複 45 筆 → 完整" in log
-    assert "本次實際取得：46 筆" in log and "去除重複 DocID：移除 1 筆，剩 45 筆" in log  # 45 page rows + 1 recovered; the boundary repeat is dropped
+    assert "本次實際取得：45 筆" in log and "去除重複 DocID：移除 1 筆，剩 45 筆" in log  # 45 page rows, +1 recovered, -1 repeat
+    assert ids[18:22] == ["DOC18", "DOC19", "DOC20", "DOC21"]
     assert "【完整性】" not in out and "邊界修補" in out
 
 
@@ -879,3 +886,102 @@ async def test_repair_survives_a_pause_and_resume(fake_site, monkeypatch):
         first = await server.airiti_search_all(resume=d.name, time_budget_s=10)
     ids = [r[1] for r in _rows(d)[1:]]
     assert len(ids) == 45 == len(set(ids)) and "DOC20" in ids
+
+
+async def test_a_record_recovered_at_the_head_of_the_next_page_sorts_back_to_its_rank(fake_site, monkeypatch):
+    state, root = fake_site
+    _tied_boundary_site(monkeypatch, tails=[19], heads=[19, 19, 20])  # DOC20 turns up as the FIRST row of page 2
+    await server.airiti_search_all("x")
+    ids = [r[1] for r in _rows(_only_run_dir(root))[1:]]
+    assert len(ids) == 45 and ids[18:23] == ["DOC18", "DOC19", "DOC20", "DOC21", "DOC22"]  # not parked after DOC39
+
+
+async def test_the_cap_keeps_a_recovered_top_ranked_record(fake_site, monkeypatch):
+    state, root = fake_site
+    _tied_boundary_site(monkeypatch, tails=[19], heads=[19, 19, 20])
+    await server.airiti_search_all("x", max_total=25)
+    ids = [r[1] for r in _rows(_only_run_dir(root))[1:]]
+    assert ids == [f"DOC{i}" for i in range(25)]  # the old order cut DOC20 and kept DOC25 instead
+
+
+async def test_completeness_is_not_hidden_when_the_cap_is_below_the_total(fake_site, monkeypatch):
+    state, root = fake_site
+    pages = {  # reported total 100, cap 25 -> two pages; 19 twice, 20 never, and the site never gets it right
+        "1": SearchPage(total=100, items=[_item(i) for i in range(0, 20)]),
+        "2": SearchPage(total=100, items=[_item(19)] + [_item(i) for i in range(21, 40)]),
+    }
+    monkeypatch.setattr(server.parsers, "parse_search", lambda html: pages[html])
+    out = await server.airiti_search_all("x", max_total=25)
+    log = (_only_run_dir(root) / "search_log.txt").read_text(encoding="utf-8")
+    assert "預期 40 筆，取得不重複 39 筆 → 缺 1 筆" in log and "總筆數 100、上限 25" in log  # was "預期 25 ... → 完整"
+    assert "【完整性】預期 40 筆，只取得 39 筆（缺 1 筆）" in out
+
+
+def test_log_flags_more_records_than_the_site_reported():
+    from datetime import datetime
+
+    log = build_log(query="q", when=datetime(2026, 11, 6, 15, 0, 0).astimezone(), reported_total=40, fetched=43, deduped=43,
+                    unique=43, pages_fetched=3, page_size=20, cap=100, items=[_it(str(i), "t" + str(i), ["a"]) for i in range(43)], expected=40)
+    assert "取得不重複 43 筆 → 多 3 筆（站方的資料可能在抓取期間更新）" in log
+
+
+async def test_a_network_failure_during_boundary_repair_pauses_and_resume_finishes_the_repair(fake_site, monkeypatch):
+    state, root = fake_site
+    _tied_boundary_site(monkeypatch, tails=[19, 19, 20], heads=[19])
+    down = {"on": True}
+    orig = server.client.fetch_search_html
+
+    async def flaky(q, page, size):
+        if down["on"] and len(state["pages"]) >= 3:  # pages 1,2,3 are the harvest; afterwards the network is down
+            state["pages"].append(page)
+            raise AiritiNetworkError("down")
+        return await orig(q, page, size)
+
+    monkeypatch.setattr(server.client, "fetch_search_html", flaky)
+    first = await server.airiti_search_all("x")
+    d = _only_run_dir(root)
+    st = harvest.load_state(d)
+    assert "因錯誤暫停" in first and "邊界修補" in first and not st.finished and st.error_streak == 1
+    assert not (d / "search_log.txt").exists()  # the run is not over, so no final log yet
+    down["on"] = False
+    second = await server.airiti_search_all(resume=d.name)
+    ids = [r[1] for r in _rows(d)[1:]]
+    assert "因錯誤暫停" not in second and len(ids) == 45 == len(set(ids)) and "DOC20" in ids
+    assert "邊界修補" in (d / "search_log.txt").read_text(encoding="utf-8")
+
+
+async def test_boundary_repair_gives_up_after_three_connection_failures_but_the_run_still_finishes(fake_site, monkeypatch):
+    state, root = fake_site
+    _tied_boundary_site(monkeypatch, tails=[19], heads=[19])
+    orig = server.client.fetch_search_html
+
+    async def dies(q, page, size):
+        if len(state["pages"]) >= 3:
+            state["pages"].append(page)
+            raise AiritiNetworkError("down")
+        return await orig(q, page, size)
+
+    monkeypatch.setattr(server.client, "fetch_search_html", dies)
+    await server.airiti_search_all("x")
+    d = _only_run_dir(root)
+    await server.airiti_search_all(resume=d.name)
+    out = await server.airiti_search_all(resume=d.name)  # third strike
+    st = harvest.load_state(d)
+    log = (d / "search_log.txt").read_text(encoding="utf-8")
+    assert st.finished and st.error_streak == 0 and "因連線問題中止" in log and "沒有得到一致" not in log
+    assert "不完整" not in out and len(_rows(d)) == 1 + 44  # the harvest itself is kept; the loss is reported, not hidden
+    assert "缺 1 筆" in log
+
+
+async def test_pause_during_boundary_repair_says_so(fake_site, monkeypatch):
+    state, root = fake_site
+    _tied_boundary_site(monkeypatch, tails=[19], heads=[19])
+    state["step"] = 6.0
+    outs = [await server.airiti_search_all("x", time_budget_s=10)]
+    d = _only_run_dir(root)
+    for _ in range(40):
+        if harvest.load_state(d).finished:
+            break
+        outs.append(await server.airiti_search_all(resume=d.name, time_budget_s=10))
+    assert any("邊界修補中（結果頁已抓完 3/3）" in o for o in outs)
+    assert not any("抓取結果頁 3/3" in o for o in outs)

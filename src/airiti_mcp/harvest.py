@@ -104,9 +104,11 @@ class RunState:
     finished: bool = False
     export_bytes: int = -1  # size of the export file after the last saved batch; -1 = unknown (older state files)
     version: int = STATE_VERSION
-    expected: int = 0  # how many records a complete harvest should hold: min(reported total, cap)
+    expected: int = 0  # distinct records the FETCHED pages should hold: min(reported total, pages_needed * page size)
     page_retries: int = 0  # result pages that had to be requested again (empty or broken answers)
     row_page: list[int] = field(default_factory=list)  # page number of every raw row in `items` (while harvesting)
+    row_slot: list[int] = field(default_factory=list)  # 1-based position of every raw row inside its page
+    repair_error: str = ""  # set only when boundary repair gave up because the site kept failing
     repair_tries: dict[str, int] = field(default_factory=dict)  # page boundary k (pages k|k+1) -> re-fetch rounds made
     fixed_boundaries: list[int] = field(default_factory=list)  # boundaries confirmed consistent by a fresh fetch
     repaired_records: int = 0  # records recovered by re-fetching boundaries
@@ -160,13 +162,14 @@ def resolve_run_folder(resume: str) -> Path:
 
 async def fetch_search_page(
     query: str, page: int, page_size: int, *, waits: tuple[float, ...] = PAGE_RETRY_WAITS, deadline: float | None = None
-) -> tuple[parsers.SearchPage | None, AiritiError | None, int, bool]:
+) -> tuple[parsers.SearchPage | None, AiritiError | None, int]:
     """One result page, asked again when it comes back empty or broken.
 
     Airiti sometimes answers a VALID page with the same "0 筆" block a truly empty query gets (measured about
     2% of page requests, clustered in time), so an empty answer is not believed until it repeats.
-    Returns (page or None, last error or None, retries made, exhausted). `exhausted` is False when the
-    deadline left no time for the remaining retries - the caller should pause, not blame the site."""
+    Returns (page or None, last error or None, retries made). Retries that would not fit before `deadline`
+    are skipped; the caller counts a still-bad page as one failed attempt either way, so a tiny time budget
+    can never pause a run forever."""
     res: parsers.SearchPage | None = None
     err: AiritiError | None = None
     used = 0
@@ -174,7 +177,7 @@ async def fetch_search_page(
         if attempt:
             wait = waits[attempt - 1]
             if deadline is not None and _now() + wait >= deadline:
-                return res, err, used, False
+                break
             await _sleep(wait)
             used += 1
         try:
@@ -183,15 +186,15 @@ async def fetch_search_page(
             res, err = None, e
             continue
         if res.items:
-            return res, None, used, True
-    return res, err, used, True
+            return res, None, used
+    return res, err, used
 
 
 async def start_run(query: str, max_total: int, export_key: str) -> tuple[RunState | None, str]:
     """Fetch page 1. Returns (state, "") or (None, hint-text) when the site keeps reporting 0 results."""
     from . import hints
 
-    first, err, used, _ = await fetch_search_page(query, 1, PAGE_SIZE)
+    first, err, used = await fetch_search_page(query, 1, PAGE_SIZE)
     if first is None:
         raise err  # type: ignore[misc]  # res is None only when every try raised
     if first.total == 0:
@@ -201,7 +204,7 @@ async def start_run(query: str, max_total: int, export_key: str) -> tuple[RunSta
         started=datetime.now().astimezone().isoformat(timespec="seconds"),
         total=first.total, pages_needed=-(-min(first.total, max_total) // PAGE_SIZE),
         pages_fetched=1, fetched=len(first.items), items=[asdict(i) for i in first.items], page_retries=used,
-        row_page=[1] * len(first.items),
+        row_page=[1] * len(first.items), row_slot=list(range(1, len(first.items) + 1)),
     )
     return st, ""
 
@@ -237,8 +240,11 @@ async def _repair_boundaries(st: RunState, folder: Path, deadline: float) -> boo
     same record at the end of page k and the start of page k+1 and leave its twin out entirely (seen live:
     282 rows, 281 distinct, 1 missing). A repeated DocID across a boundary therefore always means a lost one.
     Fix: ask for the two pages again; a fresh pair that shares nothing contains the whole tie group, and any
-    record we did not have is added. Best effort, REPAIR_TRIES rounds per boundary. Returns False if paused."""
-    if len(st.row_page) != len(st.items):  # state from before row_page existed: cannot tell which page a row came from
+    record we did not have is added (rows are only ever added, so a later re-fetch cannot undo an earlier repair).
+    Best effort, REPAIR_TRIES rounds per boundary. A failing fetch counts toward the 3-strikes rule: the call
+    pauses (resume retries the repair) and after MAX_ERROR_STREAK strikes the repair is abandoned with a clear
+    note - it never ends the run. Returns False when the call should pause."""
+    if not (len(st.row_page) == len(st.row_slot) == len(st.items)):  # state from before row_page/row_slot existed
         return True
     for k in _overlapping_boundaries(st):
         while st.repair_tries.get(str(k), 0) < REPAIR_TRIES and k not in st.fixed_boundaries:
@@ -246,20 +252,27 @@ async def _repair_boundaries(st: RunState, folder: Path, deadline: float) -> boo
                 return False
             fresh: dict[int, set[str]] = {}
             for pg in (k, k + 1):
-                res, _err, used, exhausted = await fetch_search_page(st.query, pg, PAGE_SIZE, deadline=deadline)
+                res, err, used = await fetch_search_page(st.query, pg, PAGE_SIZE, deadline=deadline)
                 st.page_retries += used
                 if res is None or not res.items:
-                    if not exhausted:
-                        return False  # out of time, not out of luck: do not count this round
-                    break  # the site would not answer: this round is lost, try again next round
+                    failure = err or AiritiError(f"華藝對第 {pg} 頁回報 0 筆（邊界修補重抓；已重試 {used} 次）")
+                    if not _record_error(st, f"邊界修補（第 {pg} 頁）", failure):
+                        save_state(st, folder)
+                        return False  # paused; the failed round is not counted, resume tries it again
+                    st.repair_error = st.last_error  # give up repairing, not the run
+                    _healthy(st)
+                    save_state(st, folder)
+                    return True
+                _healthy(st)
                 known = {d["doc_id"] for d in st.items}
                 fresh[pg] = {i.doc_id for i in res.items}
-                for it in res.items:
+                for slot, it in enumerate(res.items, 1):
                     if it.doc_id not in known:
                         st.items.append(asdict(it))
                         st.row_page.append(pg)
+                        st.row_slot.append(slot)  # remembered so the record sorts back to where it ranks
                         st.repaired_records += 1
-                        st.fetched += 1  # a row we now hold, so the dedupe line adds up
+                        known.add(it.doc_id)
             st.repair_tries[str(k)] = st.repair_tries.get(str(k), 0) + 1
             if len(fresh) == 2 and not (fresh[k] & fresh[k + 1]):
                 st.fixed_boundaries.append(k)
@@ -272,12 +285,9 @@ async def _harvest(st: RunState, folder: Path, deadline: float, progress: Progre
         if _now() >= deadline:
             return  # paused: harvest_done stays False
         page = st.next_page
-        res, err, used, exhausted = await fetch_search_page(st.query, page, PAGE_SIZE, deadline=deadline)
+        res, err, used = await fetch_search_page(st.query, page, PAGE_SIZE, deadline=deadline)
         st.page_retries += used
         if res is None or not res.items:
-            if not exhausted:  # no time left for the retries: pause without blaming the site
-                save_state(st, folder)
-                return
             failure = err or AiritiError(
                 f"華藝對第 {page} 頁回報 0 筆（頁碼在 1–{st.pages_needed} 之內，多半是暫時性的空頁；已重試 {used} 次）"
             )
@@ -291,20 +301,21 @@ async def _harvest(st: RunState, folder: Path, deadline: float, progress: Progre
         st.fetched += len(res.items)
         st.items += [asdict(i) for i in res.items]
         st.row_page += [page] * len(res.items)
+        st.row_slot += list(range(1, len(res.items) + 1))
         st.next_page += 1
         save_state(st, folder)
         await progress(st.pages_fetched, _units_total(st), f"已抓 {st.pages_fetched}/{st.pages_needed} 頁")
     if not st.harvest_error and not await _repair_boundaries(st, folder, deadline):
         return  # paused while repairing; resume continues from the saved tries
-    if len(st.row_page) == len(st.items):  # recovered records were appended: put them back on their page
-        order = sorted(range(len(st.items)), key=lambda i: st.row_page[i])  # stable: keeps the site's order per page
+    if len(st.row_page) == len(st.row_slot) == len(st.items):  # recovered records were appended: sort them back
+        order = sorted(range(len(st.items)), key=lambda i: (st.row_page[i], st.row_slot[i]))  # stable
         st.items = [st.items[i] for i in order]
-    st.row_page = []
+    st.row_page, st.row_slot = [], []
     # harvest over (all pages, or gave up): de-duplicate and apply the cap
     seen: set[str] = set()
     deduped = [d for d in st.items if not (d["doc_id"] in seen or seen.add(d["doc_id"]))]
     st.deduped = len(deduped)
-    st.expected = min(st.total, st.max_total)
+    st.expected = min(st.total, st.pages_needed * PAGE_SIZE)  # the cap is applied below and reported on its own
     st.items = deduped[: st.max_total]
     items = st.search_items()
     st.ids = [it.doc_id for it in items if not is_thesis(it)]
@@ -435,14 +446,18 @@ def export_lines(st: RunState) -> list[str]:
 
 
 def repair_lines(st: RunState) -> list[str]:
-    if not st.repair_tries:
+    if not st.repair_tries and not st.repair_error:
         return []
-    unconfirmed = len(st.repair_tries) - len(st.fixed_boundaries)
     line = (
         f"邊界修補：{len(st.repair_tries)} 處頁邊界出現重複（排名相同的記錄在兩次請求間順序互換），"
         f"重抓相鄰兩頁後補回 {st.repaired_records} 筆"
+        if st.repair_tries
+        else "邊界修補：偵測到頁邊界有重複記錄"
     )
-    if unconfirmed:
+    unconfirmed = len(st.repair_tries) - len(st.fixed_boundaries)
+    if st.repair_error:
+        line += f"；因連線問題中止（連續 {MAX_ERROR_STREAK} 次失敗：{st.repair_error}），可能仍缺記錄，可稍後重跑"
+    elif unconfirmed:
         line += f"；{unconfirmed} 處在 {REPAIR_TRIES} 輪內沒有得到一致的結果，可能仍缺記錄"
     return [line]
 
@@ -458,7 +473,7 @@ def write_final_files(st: RunState, folder: Path) -> None:
             query=st.query, when=when, reported_total=st.total, fetched=st.fetched, deduped=st.deduped,
             unique=len(items), pages_fetched=st.pages_fetched, page_size=PAGE_SIZE, cap=st.max_total,
             items=items, error=harvest_error, export_lines=export_lines(st), run_note=note,
-            expected=st.expected, page_retries=st.page_retries, notes=repair_lines(st),
+            expected=st.expected, page_retries=st.page_retries, notes=repair_lines(st), repaired=st.repaired_records,
         ),
         encoding="utf-8",
     )
@@ -471,11 +486,12 @@ def summary(st: RunState, folder: Path, budget_s: float | None = None) -> str:
     if st.finished:
         head = f"查詢「{st.query}」：華藝回報共 {st.total} 筆；取得 {n_unique} 筆（{st.pages_fetched} 頁）。"
     else:
-        where = (
-            f"抓取結果頁 {st.pages_fetched}/{st.pages_needed}"
-            if not st.harvest_done
-            else f"匯出書目 {st.export_cursor}/{len(st.ids)} 篇"
-        )
+        if st.harvest_done:
+            where = f"匯出書目 {st.export_cursor}/{len(st.ids)} 篇"
+        elif st.next_page > st.pages_needed:
+            where = f"邊界修補中（結果頁已抓完 {st.pages_fetched}/{st.pages_needed}）"
+        else:
+            where = f"抓取結果頁 {st.pages_fetched}/{st.pages_needed}"
         if st.error_streak:
             head = (
                 f"【因錯誤暫停，尚未完成】{st.last_error}（連續第 {st.error_streak}/{MAX_ERROR_STREAK} 次失敗）；進度：{where}。\n"

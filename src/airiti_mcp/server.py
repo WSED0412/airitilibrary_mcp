@@ -72,7 +72,7 @@ async def airiti_search(query: str, page: int = 1, max_results: int = 10) -> str
     # The site sometimes answers a valid page with the same "0 筆" block a truly empty query gets, so an empty
     # answer is asked again before it is believed (page 1: twice; later pages may simply be out of range: once).
     waits = harvest.PAGE_RETRY_WAITS if page == 1 else harvest.PAGE_RETRY_WAITS[:1]
-    result, err, retries, _ = await harvest.fetch_search_page(query, page, max_results, waits=waits)
+    result, err, retries = await harvest.fetch_search_page(query, page, max_results, waits=waits)
     if result is None:
         raise err  # type: ignore[misc]  # every try raised
 

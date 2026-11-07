@@ -97,7 +97,7 @@ def build_log(
     *, query: str, when: datetime, reported_total: int, fetched: int, unique: int,
     pages_fetched: int, page_size: int, cap: int, items: list[SearchItem], error: str = "",
     export_lines: list[str] | None = None, deduped: int | None = None, run_note: str = "",
-    expected: int | None = None, page_retries: int = 0, notes: list[str] | None = None,
+    expected: int | None = None, page_retries: int = 0, notes: list[str] | None = None, repaired: int = 0,
 ) -> str:
     deduped = unique if deduped is None else deduped
     truncated = reported_total > cap
@@ -116,7 +116,8 @@ def build_log(
         "",
         f"華藝回報總筆數：{reported_total}",
         f"本次實際取得：{fetched} 筆（每頁 {page_size} 筆，共抓 {pages_fetched} 頁）",
-        f"去除重複 DocID：移除 {fetched - deduped} 筆，剩 {deduped} 筆",
+        f"去除重複 DocID：移除 {fetched + repaired - deduped} 筆，剩 {deduped} 筆"
+        + (f"（含邊界修補補回的 {repaired} 筆在內共 {fetched + repaired} 列）" if repaired else ""),
         f"超過上限而未納入：{deduped - unique} 筆（不是重複）" if deduped > unique else "超過上限而未納入：0 筆",
         f"納入清單（results.csv）：{unique} 筆",
         f"疑似重複（篇名與作者相同、DocID 不同；未自動移除）：{n_groups} 組、涉及 {len(groups)} 筆，見 results.csv「疑似重複組」欄",
@@ -128,7 +129,9 @@ def build_log(
     if expected is not None:
         missing = max(0, expected - deduped)
         line = f"完整性核對：預期 {expected} 筆，取得不重複 {deduped} 筆"
-        if not missing:
+        if deduped > expected:
+            line += f" → 多 {deduped - expected} 筆（站方的資料可能在抓取期間更新）"
+        elif not missing:
             line += " → 完整"
         elif error:
             line += f" → 缺 {missing} 筆（抓取中途放棄，見下方【不完整】）"
@@ -137,6 +140,8 @@ def build_log(
                 f" → 缺 {missing} 筆。可能原因：頁邊界上排名相同的記錄在兩次請求之間互換位置，造成一筆重複、一筆漏抓；"
                 "建議縮小查詢範圍，或再跑一次互相比對。"
             )
+        if expected < reported_total:
+            line += f"（只核對所抓頁數範圍內的 {expected} 筆；總筆數 {reported_total}、上限 {cap}）"
         extra.append(line)
     if page_retries:
         extra.append(f"頁面重試：{page_retries} 次（華藝偶爾對有效頁碼暫時回 0 筆或出錯，已自動重試補回）")
