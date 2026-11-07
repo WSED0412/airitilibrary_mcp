@@ -110,14 +110,13 @@ async def airiti_search(query: str, page: int = 1, max_results: int = 10) -> str
 
 async def _detail(doc_id: str, with_references: bool = False, with_cited_by: bool = False) -> parsers.Detail:
     doc_id = _check_doc_id(doc_id)
-    html = await client.fetch_detail_html(doc_id)
     try:
-        return parsers.parse_detail(html, doc_id, with_references, with_cited_by)
+        return await harvest.fetch_detail(doc_id, with_references, with_cited_by)
     except AiritiParseError as e:
         if re.match(r"U\d", doc_id):
             raise AiritiParseError(
-                f"{e} 另外，U 開頭的 DocID 多半是學位論文；華藝已把學位論文分到 airitietds.com，"
-                "airitilibrary.com 目前讀不到這類詳目頁。"
+                f"{e} 另外，U 開頭是學位論文；華藝的學位論文詳目頁多數讀得到，所以這比較像是 DocID 不完整"
+                "（請把 airiti_search 給的 DocID 原樣傳入）或該筆暫時讀不到。"
             ) from e
         raise
 
@@ -217,7 +216,7 @@ async def airiti_export_citation(doc_ids: list[str] | str, format: str = "bibtex
 
     content, site_msg = await harvest.export_ids(ids, site_type)
     if not content:
-        hint = "請確認每個 DocID 都正確；U 開頭多半是學位論文，華藝已分到 airitietds.com。批次失敗時可改單篇匯出找出無效的 DocID。"
+        hint = "請確認每個 DocID 都完整正確（要原樣取自 airiti_search）。批次失敗時可改單篇匯出找出無效的 DocID。"
         raise AiritiError(f"華藝沒有回傳 {desc} 內容（重試一次仍失敗）。站方訊息：{site_msg or '（無）'}。{hint}")
     if save:
         folder = search_export.make_export_folder(f"export_{len(ids)}", datetime.now().astimezone())
@@ -257,7 +256,7 @@ async def airiti_search_all(
     Args:
         query: 搜尋關鍵字，空白分隔（每個詞都要符合），例如「鷹架 數學解題」。續跑時不用填。
         max_total: 最多取得幾筆，1–2000，預設 1000；總筆數超過時結果會被截斷，紀錄檔會註明。
-        export_format: 選填，bibtex／ris／endnote 其中之一；填了會把可匯出的文獻（學位論文除外）每 20 篇一批
+        export_format: 選填，bibtex／ris／endnote 其中之一；填了會把結果（含學位論文）每 20 篇一批
             向華藝匯出，合併成同資料夾裡的一個檔（export.bib／export.ris／export.enw）。預設空白＝不匯出。
         resume: 續跑用。若上次回傳【已暫停】，把它給的資料夾名稱填在這裡再呼叫一次，其他參數不用重填。
         time_budget_s: 單次呼叫最多工作幾秒（10–900，預設 90）。時間到會乾淨暫停並存下進度，避免被客戶端逾時中斷；

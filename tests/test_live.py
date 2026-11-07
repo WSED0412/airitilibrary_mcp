@@ -61,9 +61,17 @@ async def test_search_shows_open_access():
     assert "[OpenAccess]" in await server.airiti_search("鷹架 數學解題", 1, 10)
 
 
-async def test_thesis_style_docid_error_explains_why():
-    with pytest.raises(Exception, match="airitietds.com"):
-        await server.airiti_abstract("U0021-1610201315285936")
+async def test_thesis_detail_page_is_readable_and_exportable():
+    # theses (DocID U...) used to be unreadable on airitilibrary.com; today they are served and export as TY - THES
+    out = await server.airiti_abstract("U0021-1610201315285936")
+    assert "學位論文" in out and "線上合作鷹架策略" in out
+    ris = await server.airiti_export_citation(["U0021-1610201315285936"], "ris")
+    assert "TY  - THES" in ris and "UR  -" in ris
+
+
+async def test_unknown_or_truncated_thesis_docid_gives_a_clear_error():
+    with pytest.raises(Exception, match="請確認 DocID"):
+        await server.airiti_abstract("U0017-06102015")  # a truncated id: the site answers with its home page shell
 
 
 async def test_open_access_on_detail_page():

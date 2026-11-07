@@ -167,15 +167,15 @@ def test_run_folder_name_is_filesystem_safe():
     assert run_folder_name("???", datetime(2026, 11, 6, 15, 0, 0)).endswith("_query")
 
 
-async def test_search_all_exports_merged_file_and_skips_theses(fake_site):
+async def test_search_all_exports_merged_file_and_includes_theses(fake_site):
     state, root = fake_site
     out = await server.airiti_search_all("x", export_format="ris")
     d = _only_run_dir(root)
     text = (d / "export.ris").read_bytes().decode("utf-8")
-    assert text.count("TY  - JOUR") == 40 and "T1  - U3" not in text and "T1  - DOC0" in text  # 45 - 5 theses
-    assert [len(c) for c in state["export_calls"]] == [20, 20]  # batches of 20
+    assert text.count("TY  - JOUR") == 45 and "T1  - U3" in text and "T1  - DOC0" in text  # the 5 theses are exported too
+    assert [len(c) for c in state["export_calls"]] == [20, 20, 5]  # batches of 20
     log = (d / "search_log.txt").read_text(encoding="utf-8")
-    assert "成功 40 篇" in log and "略過學位論文 5 篇" in log and "匯出失敗" not in log
+    assert "成功 45 篇" in log and "其中學位論文 5 篇" in log and "略過" not in log and "匯出失敗" not in log
     assert str(d / "export.ris") in out
 
 
@@ -185,9 +185,9 @@ async def test_search_all_isolates_invalid_doc_id_in_batch(fake_site):
     await server.airiti_search_all("x", export_format="endnote")
     d = _only_run_dir(root)
     text = (d / "export.enw").read_text(encoding="utf-8")
-    assert text.count("TY  - JOUR") == 39 and "T1  - DOC7" + CRLF not in text and "T1  - DOC6" in text
+    assert text.count("TY  - JOUR") == 44 and "T1  - DOC7" + CRLF not in text and "T1  - DOC6" in text
     log = (d / "search_log.txt").read_text(encoding="utf-8")
-    assert "成功 39 篇" in log and "匯出失敗" in log and "DOC7" in log
+    assert "成功 44 篇" in log and "匯出失敗" in log and "DOC7" in log
 
 
 async def test_search_all_without_export_format_does_not_export(fake_site):
@@ -220,7 +220,7 @@ async def test_export_gives_up_after_three_failures_and_separates_unattempted_fr
     await server.airiti_search_all(resume=d.name)
     out = await server.airiti_search_all(resume=d.name)
     log = (d / "search_log.txt").read_text(encoding="utf-8")
-    assert "匯出中斷】連續失敗 3 次後放棄" in log and "因中斷未處理】20 篇" in log
+    assert "匯出中斷】連續失敗 3 次後放棄" in log and "因中斷未處理】25 篇" in log
     assert "匯出失敗" not in log and "DOC22" not in log  # untried ids are not listed as invalid
     assert "成功 20 篇" in log and "因中斷未處理" in out
 
@@ -243,9 +243,9 @@ async def test_transient_export_error_is_retried_on_resume_without_duplicates(fa
     second = await server.airiti_search_all(resume=d.name)
     assert "因錯誤暫停" not in second and "已暫停" not in second
     titles = [l for l in (d / "export.ris").read_bytes().decode("utf-8").split(CRLF) if l.startswith("T1  - ")]
-    assert len(titles) == 40 == len(set(titles))
+    assert len(titles) == 45 == len(set(titles))
     log = (d / "search_log.txt").read_text(encoding="utf-8")
-    assert "成功 40 篇" in log and "因中斷未處理" not in log and "匯出中斷" not in log
+    assert "成功 45 篇" in log and "因中斷未處理" not in log and "匯出中斷" not in log
 
 
 async def test_isolating_a_bad_id_costs_few_requests(fake_site):
@@ -253,7 +253,7 @@ async def test_isolating_a_bad_id_costs_few_requests(fake_site):
     state["bad_id"] = "DOC7"
     await server.airiti_search_all("x", export_format="ris")
     # batch 1: 2 tries of the whole batch + 20 single tries (one each); batch 2: 1 call
-    assert len(state["export_calls"]) == 2 + 20 + 1
+    assert len(state["export_calls"]) == 2 + 20 + 1 + 1
 
 
 async def test_lone_bad_id_is_not_retried_again_singly(fake_site):
@@ -328,16 +328,20 @@ async def test_pauses_in_export_then_resumes_without_duplicates(fake_site):
     state["export_step"] = 50.0
     first = await server.airiti_search_all("x", export_format="ris", time_budget_s=10)
     d = _only_run_dir(root)
-    assert "已暫停" in first and "匯出書目 20/40" in first
+    assert "已暫停" in first and "匯出書目 20/45" in first
     assert (d / "export.ris").read_bytes().decode("utf-8").count("TY  - JOUR") == 20
 
-    second = await server.airiti_search_all(resume=d.name, time_budget_s=10)
+    second = first
+    for _ in range(5):  # 3 batches of 20/20/5, each "takes" 50 s against a 10 s budget: one batch per call
+        second = await server.airiti_search_all(resume=d.name, time_budget_s=10)
+        if "已暫停" not in second:
+            break
     assert "已暫停" not in second
     text = (d / "export.ris").read_bytes().decode("utf-8")
     titles = [l for l in text.split(CRLF) if l.startswith("T1  - ")]
-    assert len(titles) == 40 == len(set(titles))  # every exportable result exactly once
-    assert "成功 40 篇" in (d / "search_log.txt").read_text(encoding="utf-8")
-    assert [len(c) for c in state["export_calls"]] == [20, 20]
+    assert len(titles) == 45 == len(set(titles))  # every exportable result exactly once
+    assert "成功 45 篇" in (d / "search_log.txt").read_text(encoding="utf-8")
+    assert [len(c) for c in state["export_calls"]] == [20, 20, 5]
 
 
 async def test_resume_rejects_paths_and_unknown_runs(fake_site):
@@ -460,12 +464,12 @@ async def test_isolating_a_bad_id_respects_the_time_budget(fake_site):
     for _ in range(40):
         if "已暫停" not in await server.airiti_search_all(resume=d.name, time_budget_s=10):
             break
-    assert len(state["export_calls"]) == 2 + 20 + 1  # pausing costs no extra requests
+    assert len(state["export_calls"]) == 2 + 20 + 1 + 1  # pausing costs no extra requests
     text = (d / "export.ris").read_bytes().decode("utf-8")
     titles = [l for l in text.split(CRLF) if l.startswith("T1  - ")]
-    assert len(titles) == 39 == len(set(titles)) and "T1  - DOC7" + CRLF not in text
+    assert len(titles) == 44 == len(set(titles)) and "T1  - DOC7" + CRLF not in text
     log = (d / "search_log.txt").read_text(encoding="utf-8")
-    assert "成功 39 篇" in log and "匯出失敗】1 篇" in log and "DOC7" in log
+    assert "成功 44 篇" in log and "匯出失敗】1 篇" in log and "DOC7" in log
 
 
 async def test_abandoned_run_never_reports_progress_complete(fake_site, tmp_path):
@@ -503,7 +507,7 @@ async def test_concurrent_resume_of_one_run_is_refused_not_duplicated(fake_site,
     outs = await asyncio.gather(server.airiti_search_all(resume=d.name), server.airiti_search_all(resume=d.name))
     assert sum("正在另一個呼叫裡執行" in o for o in outs) == 1
     titles = [l for l in (d / "export.ris").read_bytes().decode("utf-8").split(CRLF) if l.startswith("T1  - ")]
-    assert len(titles) == 40 == len(set(titles))
+    assert len(titles) == 45 == len(set(titles))
 
 
 def test_resume_refuses_a_link_that_points_outside_the_export_folder(tmp_path, monkeypatch):
@@ -550,7 +554,7 @@ async def test_resume_drops_a_batch_that_was_written_but_never_saved(fake_site):
     state["export_step"] = 0.0
     await server.airiti_search_all(resume=d.name, time_budget_s=10)
     titles = [l for l in path.read_bytes().decode("utf-8").split(CRLF) if l.startswith("T1  - ")]
-    assert len(titles) == 40 == len(set(titles))  # every id exactly once; the unsaved copy was dropped
+    assert len(titles) == 45 == len(set(titles))  # every id exactly once; the unsaved copy was dropped
 
 
 async def test_old_state_without_export_bytes_is_never_truncated(fake_site):
@@ -566,7 +570,7 @@ async def test_old_state_without_export_bytes_is_never_truncated(fake_site):
     state["export_step"] = 0.0
     await server.airiti_search_all(resume=d.name, time_budget_s=10)
     after = (d / "export.ris").read_bytes()
-    assert after.startswith(before) and after.decode("utf-8").count("TY  - JOUR") == 40  # nothing was wiped
+    assert after.startswith(before) and after.decode("utf-8").count("TY  - JOUR") == 45  # nothing was wiped
 
 
 def test_state_file_version_is_checked(tmp_path):
@@ -597,7 +601,7 @@ async def test_merged_ris_keeps_every_end_tag_intact(fake_site):
     state, root = fake_site
     await server.airiti_search_all("x", export_format="ris")
     text = (_only_run_dir(root) / "export.ris").read_bytes().decode("utf-8")
-    assert text.count("ER  - " + CRLF) == text.count("TY  - JOUR") == 40  # last record of each batch included
+    assert text.count("ER  - " + CRLF) == text.count("TY  - JOUR") == 45  # last record of each batch included
 
 
 async def test_export_citation_save_writes_a_file_and_keeps_content_out_of_the_reply(fake_site):
@@ -657,7 +661,7 @@ async def test_export_path_completes_relative_urls_end_to_end(fake_site, monkeyp
     await server.airiti_search_all("x", export_format="ris")
     d = [p for p in root.iterdir() if p.is_dir()][0]
     merged = (d / "export.ris").read_bytes().decode("utf-8")
-    assert merged.count("UR  - https://www.airitilibrary.com/Article/") == 40 and "UR  - Article/" not in merged
+    assert merged.count("UR  - https://www.airitilibrary.com/Article/") == 45 and "UR  - Article/" not in merged
     assert "已補成完整網址" in (d / "search_log.txt").read_text(encoding="utf-8")
 
 

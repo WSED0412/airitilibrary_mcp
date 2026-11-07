@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import cite_export, client, parsers, search_export
-from .errors import AiritiError
+from .errors import AiritiError, AiritiShellPageError
 
 PAGE_SIZE = 20
 MAX_EXPORT = 20  # tested live with 13 at once; kept modest so one batch stays fast
@@ -88,8 +88,9 @@ class RunState:
     deduped: int = 0  # unique DocIDs before the cap
     harvest_error: str = ""  # set only when the run gave up on harvesting
     harvest_done: bool = False
-    ids: list[str] = field(default_factory=list)  # exportable (non-thesis) DocIDs, in order
-    skipped_theses: int = 0
+    ids: list[str] = field(default_factory=list)  # DocIDs to export (theses included), in order
+    skipped_theses: int = 0  # legacy: older versions skipped theses; stays 0 now but old state files carry it
+    theses: int = 0  # how many of the kept records are theses (DocID U..., exported together with the articles)
     export_cursor: int = 0
     isolate_until: int = 0  # ids[export_cursor:isolate_until] are exported one by one (a batch failed as a whole)
     done: list[str] = field(default_factory=list)
@@ -188,6 +189,24 @@ async def fetch_search_page(
         if res.items:
             return res, None, used
     return res, err, used
+
+
+async def fetch_detail(
+    doc_id: str, with_references: bool = False, with_cited_by: bool = False, *, waits: tuple[float, ...] = PAGE_RETRY_WAITS
+) -> parsers.Detail:
+    """A detail page, asked again when the site answers with its home-page shell. The shell is what a DocID that
+    does not exist gets - and now and then (about 3% of requests) a valid one too - so a single shell answer is not
+    believed. Only the shell is retried: any other parse failure means the page changed and is raised at once."""
+    for attempt in range(len(waits) + 1):
+        if attempt:
+            await _sleep(waits[attempt - 1])
+        html = await client.fetch_detail_html(doc_id)
+        try:
+            return parsers.parse_detail(html, doc_id, with_references, with_cited_by)
+        except AiritiShellPageError as e:
+            if attempt == len(waits):
+                raise AiritiShellPageError(f"{e}（已重試 {len(waits)} 次，仍是首頁殼）") from e
+    raise AssertionError("unreachable")  # the loop above always returns or raises
 
 
 async def start_run(query: str, max_total: int, export_key: str) -> tuple[RunState | None, str]:
@@ -318,8 +337,8 @@ async def _harvest(st: RunState, folder: Path, deadline: float, progress: Progre
     st.expected = min(st.total, st.pages_needed * PAGE_SIZE)  # the cap is applied below and reported on its own
     st.items = deduped[: st.max_total]
     items = st.search_items()
-    st.ids = [it.doc_id for it in items if not is_thesis(it)]
-    st.skipped_theses = len(items) - len(st.ids)
+    st.ids = [it.doc_id for it in items]  # theses export fine (RIS type THES), so nothing is skipped
+    st.theses = sum(1 for it in items if is_thesis(it))
     st.harvest_done = True
     st.export_bytes = 0  # the export file starts empty from here
     if not st.export_key or not st.ids:
@@ -431,8 +450,11 @@ def export_lines(st: RunState) -> list[str]:
     name = f"export.{ext}"
     lines = [
         f"書目匯出：{desc}，成功 {len(st.done)} 篇 → {name if st.done else '（未產生檔案）'}",
-        f"  略過學位論文 {st.skipped_theses} 篇（無法匯出）",
     ]
+    if st.theses:
+        lines.append(f"  其中學位論文 {st.theses} 篇（和期刊論文一起匯出）")
+    if st.skipped_theses:  # a run started by an older version
+        lines.append(f"  略過學位論文 {st.skipped_theses} 篇（舊版進度檔：當時學位論文不匯出）")
     if st.export_key == "ris" and st.done:
         lines.append("  備註：沒有 DOI 的記錄，華藝給的 UR 是相對路徑，已補成完整網址；其餘內容原樣。")
     if st.failed:

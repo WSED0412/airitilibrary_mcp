@@ -16,7 +16,7 @@ from urllib.parse import unquote
 from selectolax.lexbor import LexborHTMLParser, LexborNode
 
 from .client import detail_url
-from .errors import AiritiParseError
+from .errors import AiritiParseError, AiritiShellPageError
 
 _ONCLICK_DOCID = re.compile(r"\(\s*'([^']+)'")
 _COUNT = re.compile(r"([\d,]+)\s*個查詢結果")
@@ -195,8 +195,8 @@ def parse_detail(html: str, doc_id: str, with_references: bool = False, with_cit
     tree = LexborHTMLParser(html)
     title = _meta(tree, "citation_title")
     if not title:
-        raise AiritiParseError(
-            f"DocID「{doc_id}」回傳的不是文獻詳目頁（沒有 citation_title；華藝對不存在的 DocID 會回傳首頁殼）。"
+        raise AiritiShellPageError(
+            f"DocID「{doc_id}」回傳的不是文獻詳目頁（沒有 citation_title；華藝對不存在的 DocID 會回傳首頁殼，偶爾對有效的 DocID 也會）。"
             "請確認 DocID 是否完整、是否由 airiti_search 取得；若確定存在，則可能是華藝改版。"
         )
 

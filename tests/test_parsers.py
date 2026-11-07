@@ -262,3 +262,62 @@ def test_search_item_without_own_checkbox_is_loud_not_misattributed():
     broken = ITEM.format(key="K2", click="K2", n=2).replace('<input type="checkbox" class="Result_選擇" key="K2" key1="P001">', "")
     with pytest.raises(AiritiParseError):
         parse_search(search_html(items=[ok, broken]))
+
+
+SHELL = "<html><title>Airiti Library</title></html>"  # what the site sends instead of a detail page
+
+
+@pytest.fixture
+def detail_site(monkeypatch):
+    from airiti_mcp import harvest, server
+
+    state = {"calls": [], "sleeps": [], "pages": []}
+
+    async def fake_sleep(seconds):
+        state["sleeps"].append(seconds)
+
+    async def fetch(doc_id):
+        state["calls"].append(doc_id)
+        return state["pages"][min(len(state["calls"]) - 1, len(state["pages"]) - 1)]
+
+    monkeypatch.setattr(harvest, "_sleep", fake_sleep)
+    monkeypatch.setattr(server.client, "fetch_detail_html", fetch)
+    return state
+
+
+async def test_a_single_home_page_shell_is_retried_not_reported_as_an_invalid_docid(detail_site):
+    from airiti_mcp import server
+
+    detail_site["pages"] = [SHELL, DETAIL]  # the valid page comes back as a shell once
+    out = await server.airiti_abstract("ID")
+    assert "題目" in out and len(detail_site["calls"]) == 2 and detail_site["sleeps"] == [3.0]
+
+
+async def test_a_docid_that_is_always_a_shell_is_reported_after_three_tries(detail_site):
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    from airiti_mcp import server
+
+    detail_site["pages"] = [SHELL]
+    with pytest.raises(ToolError, match="請確認 DocID.*已重試 2 次"):
+        await server.airiti_abstract("ID")
+    assert len(detail_site["calls"]) == 3 and detail_site["sleeps"] == [3.0, 6.0]
+    with pytest.raises(ToolError, match="U 開頭是學位論文"):  # the thesis hint still applies, and no longer claims they are unreadable
+        await server.airiti_abstract("U0000-1")
+    with pytest.raises(ToolError) as e:
+        await server.airiti_cite_apa("ID")  # the APA tool shares the same retry
+    assert "已重試 2 次" in str(e.value)
+
+
+async def test_only_the_shell_is_retried(monkeypatch, detail_site):
+    from airiti_mcp import harvest, server
+    from airiti_mcp.errors import AiritiParseError
+
+    def broken(html, doc_id, *a):  # a page that is a real detail page but cannot be understood
+        raise AiritiParseError("structure changed")
+
+    monkeypatch.setattr(harvest.parsers, "parse_detail", broken)
+    detail_site["pages"] = [DETAIL]
+    with pytest.raises(Exception, match="structure changed"):
+        await server.airiti_abstract("ID")
+    assert len(detail_site["calls"]) == 1 and detail_site["sleeps"] == []  # a redesign is not hammered three times
