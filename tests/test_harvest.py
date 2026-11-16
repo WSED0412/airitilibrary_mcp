@@ -786,3 +786,36 @@ async def test_run_lock_is_shared_by_every_spelling_of_one_folder(fake_site):
     assert sum("正在另一個呼叫裡執行" in o for o in outs) == 1
     titles = [l for l in (d / "export.ris").read_bytes().decode("utf-8").split(CRLF) if l.startswith("T1  - ")]
     assert len(titles) == 45 == len(set(titles))
+
+
+async def test_rate_limited_page_is_not_asked_again(fake_site, monkeypatch):
+    from airiti_mcp.errors import AiritiBlockedError
+
+    state, root = fake_site
+    orig = server.client.fetch_search_html
+
+    async def fetch(query, page, page_size):
+        if page == 2:
+            state["pages"].append(page)
+            raise AiritiBlockedError("華藝回應 HTTP 429")
+        return await orig(query, page, page_size)
+
+    monkeypatch.setattr(server.client, "fetch_search_html", fetch)
+    out = await server.airiti_search_all("x")
+    assert "因錯誤暫停" in out and "HTTP 429" in out
+    assert state["pages"] == [1, 2] and state["sleeps"] == []  # one request, no back-off retries
+
+
+async def test_rate_limited_first_page_fails_at_once(fake_site, monkeypatch):
+    from airiti_mcp.errors import AiritiBlockedError
+
+    state, root = fake_site
+
+    async def fetch(query, page, page_size):
+        state["pages"].append(page)
+        raise AiritiBlockedError("華藝回應 HTTP 429")
+
+    monkeypatch.setattr(server.client, "fetch_search_html", fetch)
+    with pytest.raises(ToolError, match="AiritiBlockedError: 華藝回應 HTTP 429"):
+        await server.airiti_search("x")
+    assert state["pages"] == [1] and state["sleeps"] == []

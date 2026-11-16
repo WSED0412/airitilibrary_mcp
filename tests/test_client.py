@@ -160,3 +160,12 @@ async def test_error_messages_leave_out_the_query_string(monkeypatch):
     with pytest.raises(AiritiNetworkError) as e:
         await client.fetch_search_html("鷹架 數學解題", 3, 20)
     assert str(e.value) == "華藝回應 HTTP 503：https://www.airitilibrary.com/Article/Query"
+
+
+@pytest.mark.parametrize("status", [403, 429])
+async def test_refused_or_rate_limited_is_its_own_error_and_names_retry_after(monkeypatch, status):
+    from airiti_mcp.errors import AiritiBlockedError
+
+    mock_site(monkeypatch, lambda r: httpx.Response(status, headers={"Retry-After": "120"}))
+    with pytest.raises(AiritiBlockedError, match=f"HTTP {status}.*Retry-After：120.*不會自動重試"):
+        await client.fetch_detail_html("X1")

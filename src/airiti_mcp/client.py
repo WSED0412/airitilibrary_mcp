@@ -16,7 +16,7 @@ from urllib.parse import quote
 import httpx
 
 from .cite_export import parse_cite_token
-from .errors import AiritiNetworkError
+from .errors import AiritiBlockedError, AiritiNetworkError
 
 BASE = "https://www.airitilibrary.com"
 TIMEOUT = 15.0
@@ -50,6 +50,13 @@ async def _throttled(client: httpx.AsyncClient, method: str, url: str, **kwargs)
             raise AiritiNetworkError(f"無法連線華藝（{type(e).__name__}）：{e}") from e
         finally:
             _last_request_at = time.monotonic()
+    if resp.status_code in (403, 429):
+        after = (resp.headers.get("Retry-After") or "").strip()[:40]
+        raise AiritiBlockedError(
+            f"華藝回應 HTTP {resp.status_code}：{_endpoint(url)}。這表示請求被拒絕或被限流"
+            + (f"（站方要求等待 Retry-After：{after}）" if after else "")
+            + "；本工具不會自動重試。請先停止使用，隔一段時間（至少幾十分鐘）再試，不要連續重試。"
+        )
     if resp.status_code != 200:
         raise AiritiNetworkError(f"華藝回應 HTTP {resp.status_code}：{_endpoint(url)}")
     return resp

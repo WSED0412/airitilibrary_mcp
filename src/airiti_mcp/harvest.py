@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import cite_export, client, parsers, search_export
-from .errors import AiritiError, AiritiShellPageError
+from .errors import AiritiBlockedError, AiritiError, AiritiShellPageError
 
 PAGE_SIZE = 20
 MAX_EXPORT = 20  # tested live with 13 at once; kept modest so one batch stays fast
@@ -190,6 +190,8 @@ async def fetch_search_page(
             used += 1
         try:
             res, err = parsers.parse_search(await client.fetch_search_html(query, page, page_size)), None
+        except AiritiBlockedError as e:  # 403 / 429: asking again would only dig the hole deeper
+            return None, e, used
         except AiritiError as e:
             res, err = None, e
             continue

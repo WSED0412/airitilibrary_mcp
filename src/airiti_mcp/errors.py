@@ -6,6 +6,11 @@ class AiritiNetworkError(AiritiError):
     """Could not reach the site, timed out, or got a non-2xx HTTP status."""
 
 
+class AiritiBlockedError(AiritiNetworkError):
+    """HTTP 403 or 429: the site is refusing or rate-limiting us. Never retried automatically - asking again
+    at once is exactly what a rate limit forbids."""
+
+
 class AiritiParseError(AiritiError):
     """Got a response, but it did not have the structure we expect (site changed, or wrong page)."""
 
