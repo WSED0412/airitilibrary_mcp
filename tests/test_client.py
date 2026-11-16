@@ -153,3 +153,10 @@ async def test_cite_export_reports_a_changed_site_when_the_token_is_missing(monk
     mock_site(monkeypatch, lambda r: httpx.Response(200, text="<html>no token here</html>"))
     with pytest.raises(AiritiParseError, match="防偽 token"):
         await client.fetch_cite_export(["DOC1"], "RIS")
+
+
+async def test_error_messages_leave_out_the_query_string(monkeypatch):
+    mock_site(monkeypatch, lambda r: httpx.Response(503))
+    with pytest.raises(AiritiNetworkError) as e:
+        await client.fetch_search_html("鷹架 數學解題", 3, 20)
+    assert str(e.value) == "華藝回應 HTTP 503：https://www.airitilibrary.com/Article/Query"

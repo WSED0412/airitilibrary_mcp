@@ -30,6 +30,12 @@ _lock = asyncio.Lock()
 _last_request_at = 0.0
 
 
+def _endpoint(url: str) -> str:
+    """The URL without its query string, for error messages: a search URL carries the whole query as about 900
+    characters of percent-encoded JSON, and the message ends up in the conversation, state.json and search_log.txt."""
+    return url.split("?", 1)[0]
+
+
 async def _throttled(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
     global _last_request_at
     async with _lock:  # serialises requests so the interval holds under concurrency
@@ -39,13 +45,13 @@ async def _throttled(client: httpx.AsyncClient, method: str, url: str, **kwargs)
         try:
             resp = await client.request(method, url, **kwargs)
         except httpx.TimeoutException as e:
-            raise AiritiNetworkError(f"連線華藝逾時（{TIMEOUT:.0f} 秒）：{url}") from e
+            raise AiritiNetworkError(f"連線華藝逾時（{TIMEOUT:.0f} 秒）：{_endpoint(url)}") from e
         except httpx.HTTPError as e:
             raise AiritiNetworkError(f"無法連線華藝（{type(e).__name__}）：{e}") from e
         finally:
             _last_request_at = time.monotonic()
     if resp.status_code != 200:
-        raise AiritiNetworkError(f"華藝回應 HTTP {resp.status_code}：{url}")
+        raise AiritiNetworkError(f"華藝回應 HTTP {resp.status_code}：{_endpoint(url)}")
     return resp
 
 

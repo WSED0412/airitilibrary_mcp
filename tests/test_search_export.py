@@ -90,3 +90,11 @@ def test_log_flags_more_records_than_the_site_reported():
     log = build_log(query="q", when=datetime(2026, 11, 6, 15, 0, 0).astimezone(), reported_total=40, fetched=43, deduped=43,
                     unique=43, pages_fetched=3, page_size=20, cap=100, items=[_it(str(i), "t" + str(i), ["a"]) for i in range(43)], expected=40)
     assert "取得不重複 43 筆 → 多 3 筆（站方的資料可能在抓取期間更新）" in log
+
+
+def test_csv_keeps_formula_looking_cells_as_text():
+    items = [_it("A1", '=HYPERLINK("http://x","y")', ["@甲", "乙"], "+刊名"), _it("A2", "-omics 研究", ["丙"]), _it("A3", "正常篇名", ["丁"])]
+    rows = list(csv.reader(io.StringIO(build_csv(items))))
+    assert rows[1][2] == "'=HYPERLINK(\"http://x\",\"y\")" and rows[1][3] == "'@甲；乙" and rows[1][4] == "'+刊名"
+    assert rows[2][2] == "'-omics 研究"
+    assert rows[3][1:4] == ["A3", "正常篇名", "丁"]  # ordinary cells and DocIDs are untouched

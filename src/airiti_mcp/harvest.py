@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -44,10 +45,11 @@ def now() -> float:
     return _now()
 
 
-def run_lock(name: str) -> asyncio.Lock:
+def run_lock(folder: Path) -> asyncio.Lock:
     """One lock per run folder: two calls must never advance the same run at the same time
-    (they would both export the same batch). In-process only; a second MCP server process is not covered."""
-    return _locks.setdefault(name, asyncio.Lock())
+    (they would both export the same batch). In-process only; a second MCP server process is not covered.
+    Keyed by the resolved path, not the name the caller typed: on Windows "Run", "run" and "Run." are one folder."""
+    return _locks.setdefault(os.path.normcase(str(folder.resolve())), asyncio.Lock())
 
 
 async def _no_progress(progress: float, total: float | None, message: str) -> None:
@@ -393,7 +395,9 @@ async def _export(st: RunState, folder: Path, deadline: float, progress: Progres
         single = cursor < st.isolate_until
         batch = st.ids[cursor : cursor + (1 if single else MAX_EXPORT)]
         try:
-            content, _ = await export_ids(batch, site_type, attempts=1 if single else 2)
+            # two tries for a single id as well: the site sometimes answers a VALID id with an empty result once,
+            # and one try would list that id under "華藝拒絕這些 DocID" next to the really invalid one
+            content, _ = await export_ids(batch, site_type)
         except AiritiError as e:  # network/parse trouble
             if not _record_error(st, "匯出", e):
                 save_state(st, folder)

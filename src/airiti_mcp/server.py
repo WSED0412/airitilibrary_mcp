@@ -308,7 +308,7 @@ async def airiti_search_all(
         folder = search_export.make_unique_folder(search_export.run_folder_name(query, datetime.fromisoformat(st.started)))
         harvest.save_state(st, folder)
 
-    lock = harvest.run_lock(folder.name)
+    lock = harvest.run_lock(folder)
     if lock.locked():  # never advance one run from two calls at once (they would repeat each other's work)
         return f"檢索「{folder.name}」正在另一個呼叫裡執行中，請等它回傳後再用 resume 呼叫，不要同時跑兩個。"
     async with lock:

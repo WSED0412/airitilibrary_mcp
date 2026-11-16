@@ -161,8 +161,8 @@ async def test_isolating_a_bad_id_costs_few_requests(fake_site):
     state, root = fake_site
     state["bad_id"] = "DOC7"
     await server.airiti_search_all("x", export_format="ris")
-    # batch 1: 2 tries of the whole batch + 20 single tries (one each); batch 2: 1 call
-    assert len(state["export_calls"]) == 2 + 20 + 1 + 1
+    # batch 1: 2 tries of the whole batch + 20 single tries (the bad id gets a second one); batch 2: 1 call
+    assert len(state["export_calls"]) == 2 + 20 + 1 + 1 + 1
 
 
 async def test_lone_bad_id_is_not_retried_again_singly(fake_site):
@@ -275,7 +275,7 @@ async def test_isolating_a_bad_id_respects_the_time_budget(fake_site):
     for _ in range(40):
         if "已暫停" not in await server.airiti_search_all(resume=d.name, time_budget_s=10):
             break
-    assert len(state["export_calls"]) == 2 + 20 + 1 + 1  # pausing costs no extra requests
+    assert len(state["export_calls"]) == 2 + 20 + 1 + 1 + 1  # pausing costs no extra requests
     text = (d / "export.ris").read_bytes().decode("utf-8")
     titles = [l for l in text.split(CRLF) if l.startswith("T1  - ")]
     assert len(titles) == 44 == len(set(titles)) and "T1  - DOC7" + CRLF not in text
@@ -738,3 +738,51 @@ def test_the_provisional_csv_of_a_paused_run_lists_recovered_records_in_rank_ord
     assert [d["doc_id"] for d in st.unique_now()] == ["1", "2", "X", "3"]  # was 1, 2, 3, X
     st.row_page = []  # state written before row_page existed: fall back to arrival order
     assert [d["doc_id"] for d in st.unique_now()] == ["1", "2", "3", "X"]
+
+
+async def test_isolation_gives_a_valid_id_a_second_try_before_calling_it_refused(fake_site, monkeypatch):
+    state, root = fake_site
+    state["bad_id"] = "DOC7"
+    orig = server.client.fetch_cite_export
+    flaky = {"DOC5": 1}  # valid, but the site answers it with an empty result once
+
+    async def export(ids, site_type):
+        if len(ids) == 1 and flaky.get(ids[0], 0) > 0:
+            flaky[ids[0]] -= 1
+            state["export_calls"].append(list(ids))
+            return '{"ReturnValue": 0, "ReturnData": {"ID": "x", "Content": ""}}'
+        return await orig(ids, site_type)
+
+    monkeypatch.setattr(server.client, "fetch_cite_export", export)
+    await server.airiti_search_all("x", export_format="ris")
+    d = _only_run_dir(root)
+    st = harvest.load_state(d)
+    assert st.failed == ["DOC7"] and "DOC5" in st.done and len(st.done) == 44
+    assert state["export_calls"].count(["DOC5"]) == 2
+
+
+async def test_run_lock_is_shared_by_every_spelling_of_one_folder(fake_site):
+    import asyncio
+
+    state, root = fake_site
+    state["export_step"] = 50.0
+    await server.airiti_search_all("x", export_format="ris", time_budget_s=10)
+    d = _only_run_dir(root)
+    state["export_step"] = 0.0
+    if not (root / d.name.upper() / "state.json").is_file():
+        pytest.skip("case-sensitive file system: another spelling is another folder")
+    assert harvest.run_lock(root / d.name.upper()) is harvest.run_lock(d) is harvest.run_lock(root / (d.name + "."))
+    orig = server.client.fetch_cite_export
+
+    async def yielding(ids, site_type):
+        await asyncio.sleep(0.01)
+        return await orig(ids, site_type)
+
+    server.client.fetch_cite_export = yielding
+    try:
+        outs = await asyncio.gather(server.airiti_search_all(resume=d.name), server.airiti_search_all(resume=d.name.upper()))
+    finally:
+        server.client.fetch_cite_export = orig
+    assert sum("正在另一個呼叫裡執行" in o for o in outs) == 1
+    titles = [l for l in (d / "export.ris").read_bytes().decode("utf-8").split(CRLF) if l.startswith("T1  - ")]
+    assert len(titles) == 45 == len(set(titles))

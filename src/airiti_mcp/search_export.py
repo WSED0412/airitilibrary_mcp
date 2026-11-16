@@ -85,6 +85,12 @@ def make_export_folder(label: str, when: datetime) -> Path:
     return make_unique_folder(f"{when:%Y%m%d_%H%M%S}_{label}")
 
 
+def _plain_cell(text: str) -> str:
+    """Excel and friends run a cell that starts with = + - @ (or a tab / CR) as a formula, and these cells hold text
+    from a third-party site. A leading apostrophe keeps such a cell text; everything else is written as it is."""
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
 def build_csv(items: list[SearchItem]) -> str:
     groups = duplicate_groups(items)
     buf = io.StringIO()
@@ -92,7 +98,7 @@ def build_csv(items: list[SearchItem]) -> str:
     w.writerow(["序號", "DocID", "篇名", "作者", "出處", "類型", "OpenAccess", "網址", "預刊", "疑似重複組"])
     for i, it in enumerate(items, 1):
         w.writerow([
-            i, it.doc_id, it.title, "；".join(it.authors), it.source, it.kind,
+            i, it.doc_id, _plain_cell(it.title), _plain_cell("；".join(it.authors)), _plain_cell(it.source), it.kind,
             "Y" if it.open_access else "", it.url, "Y" if is_preprint(it) else "", groups.get(it.doc_id, ""),
         ])
     return buf.getvalue()
