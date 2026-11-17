@@ -1,88 +1,90 @@
 # airiti-mcp
 
-華藝線上圖書館（Airiti Library）的本機 MCP server（stdio）。**只做檢索與讀摘要**，不下載全文。
+**English** | [繁體中文](README.zh-TW.md)
 
-> ⚠️ **使用前請先讀下方〈使用規範與風險自負〉。** 華藝的《著作權聲明暨網站使用規範》對「自動化程式」的使用有限制；本專案是否涵蓋在內，作者無法確定。**使用風險由你自行承擔。**
+A local MCP server (stdio) for the Airiti Library (華藝線上圖書館). It **only searches and reads abstracts**; it never downloads full texts.
 
-## 使用規範與風險自負（請先讀）
+> ⚠️ **Read "Terms of use and use at your own risk" below before using this.** Airiti's *Copyright Notice and Website Terms of Use* restricts the use of "automated programs". The author cannot tell whether this project falls under that restriction. **You use it at your own risk.**
 
-本專案會由程式代為向華藝線上圖書館送出查詢（搜尋、讀摘要、匯出書目）。華藝公布的
-**[《著作權聲明暨網站使用規範》](https://www.airitilibrary.com/Home/Editor)** 對這類使用有限制，請在使用前自行閱讀原文。
+## Terms of use and use at your own risk (read first)
 
-**第四條原文**（2026-11-07 讀取；條款可能更新，請以官網最新版本為準）：
+This project sends queries (search, abstract reading, citation export) to the Airiti Library on your behalf. Airiti's published
+**[Copyright Notice and Website Terms of Use](https://www.airitilibrary.com/Home/Editor)** (in Chinese) restricts this kind of use. Please read the original text before using it.
 
-> 本網站亦禁止使用人透過自動化程式執行查詢、下載、撈取資料、擷取內容…等方式，使用本網站或將本網站收錄之內容另行載入自行或他人開發之系統或資料庫中；且使用者不得將本網站收錄之資料置入自己或第三方之自動化學習系統、數據訓練平台，或提供第三方進行AI相關數據處理與開發。
+**Article 4, verbatim** (read on 2026-11-07; the terms may change, so check Airiti's site for the current version). Translated from the original Chinese:
 
-第一條則只允許「個人、非商業用途」，且是「透過瀏覽器、手機等各類載具」進行查詢、檢閱、列印、下載。
+> The site also prohibits users from using the site, through automated programs that run queries, downloads, data scraping or content extraction, or from loading the content the site collects into systems or databases developed by themselves or others; users also may not place data collected by the site into their own or third parties' automated learning systems or data training platforms, or provide it to third parties for AI-related data processing and development.
 
-**作者的疑慮（我們不確定，也不下定論）：**
+Article 1 only permits "personal, non-commercial use", and only for searching, viewing, printing and downloading "through browsers, phones and other devices".
 
-- 本專案算不算「透過自動化程式執行查詢、下載、撈取資料、擷取內容」，**作者無法確定**。由使用者發起的單次查詢有解讀空間；整批檢索與批次匯出（`airiti_search_all`）則很難說不是「撈取資料」。
-- 把查詢結果（摘要、書目）交給 AI 助理處理，算不算條文所稱「提供第三方進行 AI 相關數據處理」，同樣不確定。
-- 作者不是律師，這裡**不是法律意見**。是否違反由華藝（以及你所屬機構與華藝之間的授權合約）認定。
-- 華藝的 [`robots.txt`](https://www.airitilibrary.com/robots.txt) 另外點名封鎖多種 AI 爬蟲，並對一般爬蟲列出 `Disallow: /Article/Query/`（搜尋功能）。
+**The author's concerns (we are not sure, and draw no conclusion):**
 
-**風險自負：** 使用本專案（含其程式碼、文件與任何輸出）的一切風險由使用者自行承擔。作者不保證它符合華藝的使用規範，
-也**不對任何後果負責**，包括但不限於帳號或 IP 被限制、機構授權受影響，以及法律責任。
+- The author **cannot tell** whether this project counts as "running queries, downloads, data scraping or content extraction through automated programs". A single query started by a user leaves room for interpretation. Batch retrieval and batch export (`airiti_search_all`) are hard to describe as anything other than "data scraping".
+- Whether handing query results (abstracts, bibliographic data) to an AI assistant counts as "providing it to third parties for AI-related data processing" is likewise unclear.
+- The author is not a lawyer, and this is **not legal advice**. Whether it violates the terms is for Airiti (and the license agreement between your institution and Airiti) to decide.
+- Airiti's [`robots.txt`](https://www.airitilibrary.com/robots.txt) also blocks a number of AI crawlers by name, and lists `Disallow: /Article/Query/` (the search function) for general crawlers.
 
-**請遵守以下限制：**
+**Use at your own risk:** You bear all risk of using this project (its code, documentation and any output). The author does not guarantee that it complies with Airiti's terms of use,
+and **accepts no responsibility for any consequences**, including but not limited to restrictions on your account or IP, effects on your institution's license, and legal liability.
 
-1. **不要用本 MCP 這類自動化程式查詢、下載、撈取或擷取華藝網站的內容，更不要將內容另行載入自己或他人開發的系統或資料庫中**（前者正是上面〈疑慮〉所說無法確定的部分，使用即視為自行承擔）（華藝第四條；包含你自己的資料庫、知識庫、向量資料庫，以及他人開發的平台）。
-2. **不要把擷取到的內容用於訓練或微調模型、置入自己或第三方的自動化學習系統或數據訓練平台，或提供第三方進行 AI 相關數據處理與開發**（把結果交給 AI 助理處理算不算，同樣屬上述疑慮）。
-3. 僅供**個人、非商業**的研究參考；不得重製、散布、公開傳輸，或做任何商業使用（第一、二條）。
-4. 有疑慮時，請先詢問華藝或你所屬學校的圖書館。
+**Please observe these restrictions:**
 
-本專案設計了限速（任兩次請求至少間隔 1.5 秒）、誠實的 User-Agent、不碰全文、不做快取；這些**只是降低站方負擔的做法，不等於取得華藝的許可**。
+1. **Do not use an automated program like this MCP server to query, download, scrape or extract content from the Airiti site, and above all do not load that content into systems or databases developed by yourself or others** (the former is exactly the part the concerns above are unsure about, and using it means accepting that risk yourself) (Airiti Article 4; this includes your own databases, knowledge bases and vector databases, and platforms developed by others).
+2. **Do not use the extracted content to train or fine-tune models, place it in your own or third parties' automated learning systems or data training platforms, or provide it to third parties for AI-related data processing and development** (whether handing results to an AI assistant counts is again one of the concerns above).
+3. Use it only as **personal, non-commercial** research reference. Do not reproduce, distribute or publicly transmit the content, or put it to any commercial use (Articles 1 and 2).
+4. If in doubt, ask Airiti or your school's library first.
 
-| Tool | 用途 |
+The project is designed with rate limiting (at least 1.5 seconds between any two requests), an honest User-Agent, no full-text access and no caching. These are **only measures to reduce the load on the site; they are not permission from Airiti**.
+
+| Tool | Purpose |
 |---|---|
-| `airiti_search(query, page=1, max_results=10)` | 搜尋（所有欄位）。回傳總筆數＋本頁每筆的篇名、作者、出處、DocID、詳目頁網址。`max_results` 1–20；每次只抓一頁。 |
-| `airiti_abstract(doc_id, include_references=False, include_cited_by=False)` | 完整書目（含 DOI、英文篇名、語言、OpenAccess、可全文下載標記）、中文摘要、英文並列摘要、中英關鍵字。選填：`include_references` 附參考文獻、`include_cited_by` 附華藝收錄的被引用記錄（兩者預設關閉，清單可能很長；有 DocID 的可再丟給本工具）。沒有卷號的期刊（頁面上的期號常被華藝截掉前幾位）會多發 2 個請求，改用官方匯出資料的期號；學位論文沒有期號，不會多發。 |
-| `airiti_cite_apa(doc_id)` | 以書目資料產生中文 APA 7 引用。**只支援中文期刊論文**（篇名與所有作者姓名皆為中文）；學位論文與英文／外文論文會明確拒絕，並指引改用 `airiti_export_citation` 匯出 RIS／BibTeX 到書目軟體排版。沒有卷號的文獻，頁面上的期號常被華藝截掉前幾位（實測 9 篇全錯），所以會改用官方匯出資料的期號（多 2 個請求；核對失敗就不列期號）。 |
-| `airiti_export_citation(doc_ids, format="bibtex", save=False)` | 回傳華藝官方匯出的書目檔內容，`doc_ids` 為清單或單一字串（一次最多 20 篇，合成一個檔），`format` 為 `bibtex`／`ris`／`endnote`，可存檔後匯入 Zotero、Mendeley、EndNote 等。內容來自華藝，**只做一項修改**：RIS 裡沒有 DOI 的記錄，華藝給的 `UR` 是相對路徑（`Article/Detail?docID=…`，匯入後連結會壞），這裡補成完整網址；其餘原樣。不論幾篇都只需 2 個請求（站方偶爾回空時會重試，最多 4 個）。內容超過 3 萬字元（約 15 篇以上）會**自動**存成匯出資料夾下新的子資料夾裡的 `export.<副檔名>`，只回傳路徑，免得佔滿對話上下文；`save=True` 則一律存檔。注意：清單中只要有一個無效 DocID，華藝會整批失敗。 |
-| `airiti_search_all(query, max_total=1000, export_format="", resume="", time_budget_s=90)` | 抓完一個查詢的所有結果頁（每頁 20 筆、頁間隔 1.5 秒），寫成 `results.csv`（DocID、篇名、作者、出處、類型…，另有「預刊」欄與「疑似重複組」欄：華藝會把同一篇文章的預刊版與正式刊出版各收一筆，篇名（全形半形視為相同）＋作者相同但 DocID 不同的記錄會標成同一組 D1、D2…（沒有作者的記錄不分組），**只標記、不移除**，保留哪一筆由你判斷）與 `search_log.txt`（檢索日期、檢索式、總筆數、去重與截斷各移除幾筆、疑似重複組數、類型分布，可寫進方法章節）。檔案存到 `~/airiti_exports/<時間>_<關鍵字>/`，可用環境變數 `AIRITI_EXPORT_DIR` 改位置；工具本身不接受路徑。`max_total` 1–2000。選填 `export_format`（`bibtex`／`ris`／`endnote`）：把結果（含學位論文）每 20 篇一批向華藝匯出，合併成同資料夾的 `export.bib`／`.ris`／`.enw`；某批失敗會逐篇重試找出無效 DocID，並記在檢索紀錄。**逾時保護**：單次呼叫最多工作約 `time_budget_s` 秒（10–900）就乾淨暫停並把進度存成 `state.json`，回傳【已暫停】與資料夾名稱，再用 `resume=<資料夾名稱>` 呼叫即可從斷點繼續（不會重抓、不會重複匯出）；重複呼叫到不再暫停為止。暫時性錯誤（網路等）不會直接結束檢索：會【因錯誤暫停】，`resume` 重試同一步，連續失敗 3 次才放棄並把已取得的部分標示為不完整；同一個檢索不能同時被兩個呼叫推進（第二個會被拒絕，避免重複匯出）；`resume` 只認匯出資料夾裡的資料夾名稱，指到別處的連結會被拒絕。有進度回報（MCP progress）。**分頁可靠性**（實測華藝的行為）：對有效頁碼偶爾會回「0 筆」（約 2%），一頁回空或出錯會自動等 3 秒、6 秒重試；排名相同的記錄在每次請求都隨機排序，橫跨頁邊界時會出現「一筆重複、一筆漏抓」，偵測到相鄰兩頁有重複時會重抓這兩頁補回（每個邊界最多 3 輪，補回的記錄依原本名次排回去）；紀錄檔有「完整性核對」（預期筆數 vs 實際不重複筆數，缺幾筆會寫出來，修補連線失敗連續 3 次會中止並註明）。第 1 頁回 0 筆也會先確認再說「查無結果」。詳目頁也有同類現象（有效的 DocID 偶爾回首頁殼，約 3%），`airiti_abstract`／`airiti_cite_apa` 遇到會先重試再說「DocID 不存在」。只回傳摘要與路徑。 |
+| `airiti_search(query, page=1, max_results=10)` | Search (all fields). Returns the total count plus, for each result on the page, the title, authors, source, DocID and detail-page URL. `max_results` is 1–20; fetches one page per call. |
+| `airiti_abstract(doc_id, include_references=False, include_cited_by=False)` | Full bibliographic record (including DOI, English title, language, OpenAccess and full-text-available flags), the Chinese abstract, the parallel English abstract, and Chinese and English keywords. Optional: `include_references` appends the reference list and `include_cited_by` appends the citing records Airiti has indexed (both off by default because the lists can be long; entries that have a DocID can be passed back to this tool). For journals without a volume number (Airiti often truncates the leading digits of the issue number shown on the page), it sends 2 extra requests and uses the issue number from the official export data instead. Theses have no issue number and do not send the extra requests. |
+| `airiti_cite_apa(doc_id)` | Generates an APA 7 citation in Chinese from the bibliographic data. **Chinese journal articles only** (the title and every author name must be Chinese). Theses and English or other foreign-language articles are explicitly rejected, with a pointer to `airiti_export_citation` for exporting RIS / BibTeX into reference-manager software. For records without a volume number, Airiti often truncates the leading digits of the issue number on the page (all 9 articles tested were wrong), so the issue number from the official export data is used instead (2 extra requests; if the cross-check fails, the issue number is omitted). |
+| `airiti_export_citation(doc_ids, format="bibtex", save=False)` | Returns the content of Airiti's official bibliographic export file. `doc_ids` is a list or a single string (up to 20 articles per call, merged into one file) and `format` is `bibtex`, `ris` or `endnote`; the file can be saved and imported into Zotero, Mendeley, EndNote and the like. The content comes from Airiti with **one modification only**: for RIS records without a DOI, the `UR` Airiti gives is a relative path (`Article/Detail?docID=…`, which breaks after import), so it is completed to a full URL here; everything else is untouched. It needs only 2 requests however many articles there are (up to 4 if the site occasionally returns empty and a retry is needed). Content over 30,000 characters (roughly 15 or more articles) is **automatically** saved as `export.<extension>` in a new subfolder of the export folder and only the path is returned, so it does not fill the conversation context; `save=True` always saves to a file. Note: a single invalid DocID in the list makes Airiti fail the whole batch. |
+| `airiti_search_all(query, max_total=1000, export_format="", resume="", time_budget_s=90)` | Fetches every result page of one query (20 results per page, 1.5 seconds between pages) and writes `results.csv` (DocID, title, authors, source, type, …, plus a "preprint" column and a "suspected duplicate group" column: Airiti indexes the preprint and the formally published version of the same article as separate records, and records with the same title (full-width and half-width treated as equal) and authors but different DocIDs are tagged with the same group D1, D2, … (records without authors are not grouped). It **only tags and never removes**; which one to keep is your call) and `search_log.txt` (search date, query, total count, how many were removed by de-duplication and by truncation, number of suspected duplicate groups, and type distribution, which can go into a methods section). Files are saved to `~/airiti_exports/<time>_<keyword>/`; the location can be changed with the environment variable `AIRITI_EXPORT_DIR`, and the tool itself accepts no path. `max_total` is 1–2000. Optional `export_format` (`bibtex`, `ris` or `endnote`): exports the results (theses included) from Airiti in batches of 20 and merges them into `export.bib` / `.ris` / `.enw` in the same folder; if a batch fails, it retries article by article to find the invalid DocIDs and records them in the search log. **Timeout protection**: a single call works for at most about `time_budget_s` seconds (10–900), then pauses cleanly and saves progress to `state.json`. It returns 【已暫停】 (paused) with the folder name; call again with `resume=<folder name>` to continue from the breakpoint (nothing is fetched or exported twice), and repeat until it no longer pauses. Transient errors (network etc.) do not end the search outright: it pauses with 【因錯誤暫停】 (paused on error) and `resume` retries the same step; only 3 consecutive failures make it give up and mark what it has as incomplete. The same search cannot be advanced by two calls at once (the second is rejected, to avoid duplicate exports), and `resume` accepts only a folder name inside the export folder (links pointing elsewhere are rejected). Progress is reported (MCP progress). **Pagination reliability** (Airiti's behavior as observed): a valid page number occasionally returns "0 results" (about 2%), and a page that comes back empty or fails is retried automatically after waiting 3 and 6 seconds. Records with equal rank are sorted randomly on every request, so across a page boundary "one record duplicated, one record missed" occurs; when adjacent pages are found to overlap, both pages are re-fetched to recover the missing record (up to 3 rounds per boundary, and recovered records are put back in their original rank). The log has an "integrity check" (expected count vs. actual distinct count, with the shortfall written out; it aborts and says so after 3 consecutive failed repair connections). A first page returning 0 results is also confirmed before saying "no results". Detail pages show the same kind of behavior (a valid DocID occasionally returns the home-page shell, about 3%), and `airiti_abstract` / `airiti_cite_apa` retry before saying "DocID does not exist". Returns only a summary and paths. |
 
-## 行為與限制
+## Behavior and limits
 
-- 不碰任何全文／PDF 下載端點；**不做任何快取**（頁面標示 `noarchive`），每次呼叫即時查詢。
-- 任兩次請求至少間隔 1.5 秒；逾時 15 秒。
-- 以上只是降低站方負擔的設計，**不代表符合華藝的使用規範**，見最上方〈使用規範與風險自負〉。
-- 錯誤分開回報：`AiritiNetworkError`（連不上／逾時／非 200）、`AiritiBlockedError`（HTTP 403／429，被拒絕或限流；**不會自動重試**，請隔一段時間再試）、`AiritiParseError`（頁面結構不符，例如改版或 DocID 不存在）、
-  以及「0 筆結果」（連線與解析皆正常，確實沒有符合的文獻）。解析不到的欄位會寫「（無）」並在備註說明，不會猜。
-- DocID 格式不固定（可能含 `+` 等字元），一律原樣使用，由 search 結果取得。
+- It touches no full-text / PDF download endpoint and does **no caching** (pages are marked `noarchive`); every call queries live.
+- At least 1.5 seconds between any two requests; 15-second timeout.
+- The above are only designs to reduce the load on the site and **do not mean compliance with Airiti's terms of use**; see "Terms of use and use at your own risk" at the top.
+- Errors are reported separately: `AiritiNetworkError` (cannot connect / timeout / non-200), `AiritiBlockedError` (HTTP 403 / 429, refused or rate-limited; **not retried automatically**, so wait a while and try again), `AiritiParseError` (the page structure does not match, e.g. after a redesign or when the DocID does not exist),
+  and "0 results" (connection and parsing are fine and nothing matches). Fields that cannot be parsed are written as "（無）" ("none") with an explanatory note; nothing is guessed.
+- The DocID format is not fixed (it may contain characters such as `+`). Always use it as-is, as obtained from the search results.
 
-## 安裝
+## Installation
 
-需要 [uv](https://docs.astral.sh/uv/)（`winget install astral-sh.uv`）。
+Requires [uv](https://docs.astral.sh/uv/) (`winget install astral-sh.uv`).
 
 ```powershell
-cd <本專案資料夾>
+cd <this project folder>
 uv sync
-uv run pytest                      # 離線測試（不連網）
-$env:AIRITI_LIVE=1; uv run pytest tests/test_live.py   # 實網測試（約 45 個請求、1 分多鐘；請求間隔 1.5 秒）
+uv run pytest                      # offline tests (no network)
+$env:AIRITI_LIVE=1; uv run pytest tests/test_live.py   # live tests (about 45 requests, a little over a minute; 1.5 seconds between requests)
 ```
 
-## 註冊到 Claude Code
+## Register with Claude Code
 
 ```powershell
-claude mcp add airiti -- uv --directory "<專案資料夾完整路徑>" run airiti-mcp
+claude mcp add airiti -- uv --directory "<full path of the project folder>" run airiti-mcp
 ```
 
-加 `--scope user` 可在所有專案使用。用 `claude mcp list` 確認。
+Add `--scope user` to use it in all projects. Check with `claude mcp list`.
 
-## 註冊到 Claude 桌面版
+## Register with Claude Desktop
 
-編輯 `claude_desktop_config.json`（設定 → 開發人員 → 編輯設定可直接開啟），加入下列內容。一般安裝在 `%APPDATA%\Claude\`；
-商店版（MSIX）在 `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\`。JSON 裡路徑的每個 `\` 都要寫成 `\\`（例如 `C:\\Users\\你\\...`）。
+Edit `claude_desktop_config.json` (Settings → Developer → Edit Config opens it directly) and add the following. A normal install keeps it in `%APPDATA%\Claude\`;
+the Store (MSIX) version keeps it in `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\`. Every `\` in a path inside the JSON must be written as `\\` (e.g. `C:\\Users\\you\\...`).
 
 ```json
 {
   "mcpServers": {
     "airiti": {
-      "command": "<uv.exe完整路徑>",
+      "command": "<full path of uv.exe>",
       "args": [
         "--directory",
-        "<專案資料夾完整路徑>",
+        "<full path of the project folder>",
         "run",
         "airiti-mcp"
       ]
@@ -91,45 +93,45 @@ claude mcp add airiti -- uv --directory "<專案資料夾完整路徑>" run airi
 }
 ```
 
-存檔後完全結束並重開 Claude 桌面版。桌面版不一定繼承 PATH，所以 `command` 用 uv 的絕對路徑（`where uv` 可查）。
-若專案路徑含中文導致啟動失敗，把專案移到純英文路徑（如 `C:\mcp\airiti`）再改 `--directory`。
+After saving, fully quit and reopen Claude Desktop. The desktop app does not necessarily inherit PATH, so use the absolute path of uv for `command` (`where uv` shows it).
+If startup fails because the project path contains Chinese characters, move the project to an English-only path (such as `C:\mcp\airiti`) and update `--directory`.
 
-## 用 MCP Inspector 測試
+## Testing with MCP Inspector
 
 ```powershell
-# 互動式介面
-npx @modelcontextprotocol/inspector uv --directory "<專案路徑>" run airiti-mcp
-# 指令列
-npx @modelcontextprotocol/inspector --cli uv --directory "<專案路徑>" run airiti-mcp --method tools/list
-npx @modelcontextprotocol/inspector --cli uv --directory "<專案路徑>" run airiti-mcp --method tools/call --tool-name airiti_search --tool-arg query="鷹架 數學解題"
+# interactive UI
+npx @modelcontextprotocol/inspector uv --directory "<project path>" run airiti-mcp
+# command line
+npx @modelcontextprotocol/inspector --cli uv --directory "<project path>" run airiti-mcp --method tools/list
+npx @modelcontextprotocol/inspector --cli uv --directory "<project path>" run airiti-mcp --method tools/call --tool-name airiti_search --tool-arg query="鷹架 數學解題"
 ```
 
-## 結構（為了之後換成 HTTP 遠端版）
+## Structure (kept ready for a later remote HTTP version)
 
 ```
 src/airiti_mcp/
-  server.py   # MCPServer 與 tool 定義，與傳輸層無關
-  stdio.py    # ← 傳輸層入口（目前 stdio）
-  client.py   # HTTP、限速、逾時、查詢 JSON 組裝
-  parsers.py  # 搜尋頁／詳目頁解析
-  hints.py    # 搜尋結果少時的建議（異體字、少一個關鍵字）
+  server.py   # MCPServer and tool definitions, independent of the transport
+  stdio.py    # ← transport entry point (stdio for now)
+  client.py   # HTTP, rate limiting, timeouts, query JSON assembly
+  parsers.py  # search-page / detail-page parsing
+  hints.py    # suggestions when a search returns few results (variant characters, dropping a keyword)
   cite.py     # APA 7
-  cite_export.py  # 華藝官方書目匯出（BibTeX／RIS／EndNote）的解析
-  search_export.py  # airiti_search_all 的 CSV 與檢索紀錄檔
-  harvest.py  # airiti_search_all 的可續跑引擎（抓頁、批次匯出、進度、state.json）
+  cite_export.py  # parsing of Airiti's official citation export (BibTeX / RIS / EndNote)
+  search_export.py  # CSV and search-log files for airiti_search_all
+  harvest.py  # resumable engine behind airiti_search_all (page fetching, batch export, progress, state.json)
   errors.py
 ```
 
-改 Streamable HTTP 時只新增一個入口檔（例如 `http.py`：`from .server import mcp; mcp.run("streamable-http")`，
-或用 `mcp.streamable_http_app()` 掛到 uvicorn 並加上驗證），`server.py` 以下完全不用動。
-注意：限速目前是單一行程內的全域鎖；多行程部署時要改成共用的限速機制。
+To switch to Streamable HTTP, just add one entry file (for example `http.py`: `from .server import mcp; mcp.run("streamable-http")`,
+or mount `mcp.streamable_http_app()` on uvicorn and add authentication); nothing from `server.py` down needs to change.
+Note: rate limiting is currently a global lock inside a single process; a multi-process deployment needs a shared rate-limiting mechanism.
 
-## 備註
+## Notes
 
-- MCP Python SDK 已是 2.x，原本的 `FastMCP` 改名為 `MCPServer`（`mcp.server.mcpserver`）。2.x 只會把 `ToolError` 的訊息傳給用戶端，
-  所以 `server.py` 用 `_tool` 包裝把 `AiritiError` 轉成 `ToolError`。
-- 查詢 JSON 的 key（`SearchFileds`／`SearchFiledList`）是華藝原本的拼字，請勿修正。`BSF` 必填，沒送就不會有結果。
-- 搜尋欄位代碼（來自頁面 JS 列舉名稱）：`DSF.FieldName=49` ＝ 所有欄位含全文；`BSF.FieldName=0` ＝ 所有欄位。
-- **學位論文**（DocID 以 `U` 開頭、類型欄為「學位論文」）：搜尋結果裡有（約三到四成，視主題而定）。詳目頁讀得到、書目也匯得出來（RIS 類型為 `THES`）；`airiti_cite_apa` 目前只支援期刊論文，學位論文會明確拒絕。2026-11 實測抽樣 12 篇全部可讀可匯出；這是華藝的行為，將來可能再變，`tests/test_live.py` 會偵測。
-- **搜尋比對**：每個關鍵字都必須符合（AND），逐詞比對。實測華藝已統一 沉/沈、台/臺、群/羣、溫/温、週/周、峰/峯，
-  但**沒統一** 啟/啓、線/綫、楣/霉、裡/裏、衛/衞、污/汙；簡體輸入有互通但筆數略少。結果少於 5 筆時，工具會提示可試的寫法。
+- The MCP Python SDK is now 2.x, and the former `FastMCP` was renamed `MCPServer` (`mcp.server.mcpserver`). 2.x passes only the message of a `ToolError` to the client,
+  so `server.py` uses a `_tool` wrapper to turn `AiritiError` into `ToolError`.
+- The keys of the query JSON (`SearchFileds` / `SearchFiledList`) use Airiti's original spelling; do not "fix" them. `BSF` is required, and without it there are no results.
+- Search field codes (from the enum names in the page's JS): `DSF.FieldName=49` = all fields including full text; `BSF.FieldName=0` = all fields.
+- **Theses** (DocID starts with `U`, type column "學位論文"): they appear in search results (roughly 30–40%, depending on the topic). Detail pages can be read and citations exported (RIS type `THES`); `airiti_cite_apa` currently supports journal articles only and explicitly rejects theses. In a 2026-11 test, all 12 sampled theses could be read and exported; this is Airiti's behavior and may change, and `tests/test_live.py` will detect it.
+- **Search matching**: every keyword must match (AND), term by term. In testing, Airiti had unified 沉/沈, 台/臺, 群/羣, 溫/温, 週/周 and 峰/峯,
+  but had **not** unified 啟/啓, 線/綫, 楣/霉, 裡/裏, 衛/衞 and 污/汙; Simplified Chinese input is cross-matched, with slightly fewer results. When a search returns fewer than 5 results, the tool suggests spellings to try.
